@@ -1,0 +1,12 @@
+[package]
+name = "one_bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+one_engine = { path = "../one_engine" }
+one_core = { path = "../one_core" }
+one_vm = { path = "../one_vm" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"

@@ -9,6 +9,7 @@ members = [
     "crates/one_vm",
     "crates/one_runtime",
     "crates/one_engine",
+    "crates/one_bridge",
     "crates/one_cli",
 ]
 
