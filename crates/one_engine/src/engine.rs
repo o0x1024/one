@@ -532,4 +532,175 @@ mod tests {
         let result = engine.eval(r#"return Number.parseInt("42");"#).unwrap();
         assert!(result.to_number() == 42.0);
     }
+
+    #[test]
+    fn math_floor() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.floor(3.7);").unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn math_ceil() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.ceil(3.2);").unwrap();
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn math_round() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.round(3.5);").unwrap();
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn math_abs() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.abs(-42);").unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn math_max() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.max(1, 5, 3);").unwrap();
+        assert!(result.to_number() == 5.0);
+    }
+
+    #[test]
+    fn math_min() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.min(1, 5, 3);").unwrap();
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn math_sqrt() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.sqrt(16);").unwrap();
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn math_pi() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.PI;").unwrap();
+        assert!((result.to_number() - std::f64::consts::PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn math_pow() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.pow(2, 10);").unwrap();
+        assert!(result.to_number() == 1024.0);
+    }
+
+    #[test]
+    fn math_random() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let r = Math.random(); return r >= 0 && r < 1;")
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn math_trunc() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Math.trunc(3.9);").unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn json_stringify_number() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return JSON.stringify(42);").unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "42");
+    }
+
+    #[test]
+    fn json_stringify_string() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return JSON.stringify("hello");"#).unwrap();
+        assert_eq!(engine.vm().value_to_string(result), r#""hello""#);
+    }
+
+    #[test]
+    fn json_stringify_object() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"return JSON.stringify({a: 1, b: 2});"#)
+            .unwrap();
+        let s = engine.vm().value_to_string(result);
+        assert!(s.contains("\"a\":1"));
+        assert!(s.contains("\"b\":2"));
+    }
+
+    #[test]
+    fn json_stringify_array() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return JSON.stringify([1, 2, 3]);").unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "[1,2,3]");
+    }
+
+    #[test]
+    fn json_parse_number() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return JSON.parse("42");"#).unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn json_parse_object() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let obj = JSON.parse('{"x":1,"y":2}'); return obj.x + obj.y;"#)
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn json_parse_array() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let arr = JSON.parse("[1,2,3]"); return arr.length;"#)
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn error_constructor() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let e = new Error("test"); return e.message;"#)
+            .unwrap();
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn error_name() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let e = new TypeError("bad type"); return e.name;"#)
+            .unwrap();
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn throw_error_object() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                try {
+                    throw new Error("oops");
+                } catch (e) {
+                    return e.message;
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(result.is_string());
+    }
 }
