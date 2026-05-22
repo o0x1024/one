@@ -4,3 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+one_core.workspace = true
+one_compiler.workspace = true
+one_gc.workspace = true
+
+[dev-dependencies]
+one_parser.workspace = true

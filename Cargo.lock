@@ -43,3 +43,9 @@ version = "0.1.0"
 [[package]]
 name = "one_vm"
 version = "0.1.0"
+dependencies = [
+ "one_compiler",
+ "one_core",
+ "one_gc",
+ "one_parser",
+]
