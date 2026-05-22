@@ -188,20 +188,90 @@ impl Compiler {
                 handler,
                 finalizer,
             } => {
-                self.code.emit(Instruction::abx(Opcode::TryStart, 0, 0));
+                let catch_reg = if handler.is_some() {
+                    if let Some(handler) = handler {
+                        if let Some(param) = &handler.param {
+                            if let PatternKind::Identifier { .. } = &param.kind {
+                                self.alloc_reg()
+                            } else {
+                                self.alloc_reg()
+                            }
+                        } else {
+                            self.alloc_reg()
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let try_start = if handler.is_some() {
+                    Some(
+                        self.code
+                            .emit(Instruction::asbx(Opcode::TryStart, catch_reg, 0)),
+                    )
+                } else {
+                    None
+                };
+
                 for s in block {
                     self.compile_statement(s);
                 }
-                self.code.emit(Instruction::op_only(Opcode::TryEnd));
+
+                if handler.is_some() {
+                    self.code.emit(Instruction::op_only(Opcode::TryEnd));
+                }
+
+                let jump_normal = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+
+                let catch_start = self.code.current_offset();
+                if let Some(try_start) = try_start {
+                    self.code.patch_jump(try_start, catch_start);
+                }
+
                 if let Some(handler) = handler {
+                    self.code
+                        .emit(Instruction::abx(Opcode::CatchBind, catch_reg, 0));
+
+                    let saved_local = if let Some(param) = &handler.param {
+                        if let PatternKind::Identifier { name, .. } = &param.kind {
+                            Some((name.clone(), self.locals.insert(name.clone(), catch_reg)))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     for s in &handler.body {
                         self.compile_statement(s);
                     }
+
+                    if let Some((name, previous)) = saved_local {
+                        match previous {
+                            Some(prev) => {
+                                self.locals.insert(name, prev);
+                            }
+                            None => {
+                                self.locals.remove(&name);
+                            }
+                        }
+                    }
                 }
+
+                let finally_start = self.code.current_offset();
                 if let Some(finalizer) = finalizer {
                     for s in finalizer {
                         self.compile_statement(s);
                     }
+                }
+
+                let end = self.code.current_offset();
+                if finalizer.is_some() {
+                    self.code.patch_jump(jump_normal, finally_start);
+                } else {
+                    self.code.patch_jump(jump_normal, end);
                 }
             }
             StatementKind::LabeledStatement { body, .. } => {

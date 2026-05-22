@@ -17,6 +17,11 @@ struct CallFrame {
     this_val: JsValue,
 }
 
+struct ExceptionHandlerFrame {
+    catch_pc: usize,
+    frame_idx: usize,
+}
+
 /// Native function callable from JS
 pub type HostFunction = Box<dyn Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue>>;
 
@@ -27,6 +32,8 @@ pub struct Vm {
     heap: Heap,
     string_table: Vec<String>,
     host_functions: Vec<(String, HostFunction)>,
+    exception_stack: Vec<ExceptionHandlerFrame>,
+    current_exception: Option<JsValue>,
 }
 
 impl Vm {
@@ -38,6 +45,8 @@ impl Vm {
             heap: Heap::new(),
             string_table: Vec::new(),
             host_functions: Vec::new(),
+            exception_stack: Vec::new(),
+            current_exception: None,
         }
     }
 
@@ -116,6 +125,9 @@ impl Vm {
 
     /// Execute a CodeBlock
     pub fn execute(&mut self, code: &CodeBlock) -> OneResult<JsValue> {
+        self.exception_stack.clear();
+        self.current_exception = None;
+
         let base = self.stack.len();
         self.stack
             .resize(base + code.register_count as usize, JsValue::undefined());
@@ -542,8 +554,56 @@ impl Vm {
                     let caller_base = self.frames.last().unwrap().base;
                     self.stack[caller_base + frame.dest as usize] = return_val;
                 }
+                Opcode::TryStart => {
+                    let catch_pc =
+                        (self.frames[frame_idx].pc as i32 + instr.sbx() as i32) as usize;
+                    self.exception_stack.push(ExceptionHandlerFrame {
+                        catch_pc,
+                        frame_idx,
+                    });
+                }
+                Opcode::TryEnd => {
+                    self.exception_stack.pop();
+                }
+                Opcode::Throw => {
+                    let val = self.stack[base + instr.a() as usize];
+                    self.throw_exception(val)?;
+                    continue;
+                }
+                Opcode::CatchBind => {
+                    let dest = instr.a();
+                    let val = self
+                        .current_exception
+                        .take()
+                        .unwrap_or(JsValue::undefined());
+                    self.stack[base + dest as usize] = val;
+                }
                 _ => {}
             }
+        }
+    }
+
+    fn throw_exception(&mut self, val: JsValue) -> OneResult<()> {
+        self.current_exception = Some(val);
+
+        if let Some(handler) = self.exception_stack.pop() {
+            while self.frames.len() > handler.frame_idx + 1 {
+                let popped_frame_idx = self.frames.len() - 1;
+                let frame = self.frames.pop().unwrap();
+                self.stack.truncate(frame.base);
+                self.exception_stack
+                    .retain(|h| h.frame_idx != popped_frame_idx);
+            }
+
+            self.frames[handler.frame_idx].pc = handler.catch_pc;
+            Ok(())
+        } else {
+            let message = self.value_to_string(val);
+            Err(OneError::JsException(one_core::JsException {
+                name: "Error".to_string(),
+                message,
+                stack_trace: Vec::new(),
+            }))
         }
     }
 

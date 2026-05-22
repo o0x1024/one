@@ -261,4 +261,134 @@ mod tests {
         let result = run("function Foo() { this.x = 99; } let f = new Foo(); return f.x;");
         assert!(result.to_number() == 99.0);
     }
+
+    #[test]
+    fn try_catch_basic() {
+        let result = run(
+            r#"
+            let x = 0;
+            try {
+                throw 42;
+            } catch (e) {
+                x = e;
+            }
+            return x;
+        "#,
+        );
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn try_catch_no_throw() {
+        let result = run(
+            r#"
+            let x = 1;
+            try {
+                x = 2;
+            } catch (e) {
+                x = 3;
+            }
+            return x;
+        "#,
+        );
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn try_catch_string() {
+        let result = run(
+            r#"
+            let msg = "";
+            try {
+                throw "error!";
+            } catch (e) {
+                msg = e;
+            }
+            return msg;
+        "#,
+        );
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn try_finally() {
+        let result = run(
+            r#"
+            let x = 0;
+            try {
+                x = 1;
+            } finally {
+                x = x + 10;
+            }
+            return x;
+        "#,
+        );
+        assert!(result.to_number() == 11.0);
+    }
+
+    #[test]
+    fn try_catch_finally() {
+        let result = run(
+            r#"
+            let x = 0;
+            try {
+                throw 1;
+            } catch (e) {
+                x = e;
+            } finally {
+                x = x + 100;
+            }
+            return x;
+        "#,
+        );
+        assert!(result.to_number() == 101.0);
+    }
+
+    #[test]
+    fn nested_try_catch() {
+        let result = run(
+            r#"
+            let x = 0;
+            try {
+                try {
+                    throw 1;
+                } catch (e) {
+                    x = e;
+                    throw 2;
+                }
+            } catch (e) {
+                x = x + e;
+            }
+            return x;
+        "#,
+        );
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn uncaught_exception_returns_error() {
+        let program = Parser::parse("throw 42;").unwrap();
+        let code = Compiler::compile(&program);
+        let mut vm = Vm::new();
+        let result = vm.execute(&code);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_catch_in_function() {
+        let result = run(
+            r#"
+            function safe_div(a, b) {
+                try {
+                    if (b === 0) { throw "division by zero"; }
+                    return a / b;
+                } catch (e) {
+                    return -1;
+                }
+            }
+            return safe_div(10, 0);
+        "#,
+        );
+        assert!(result.to_number() == -1.0);
+    }
 }
