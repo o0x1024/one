@@ -9,6 +9,7 @@ pub struct Compiler {
     code: CodeBlock,
     next_register: u8,
     locals: HashMap<String, u8>,
+    is_top_level: bool,
 }
 
 impl Compiler {
@@ -17,12 +18,42 @@ impl Compiler {
             code: CodeBlock::new(name),
             next_register: 0,
             locals: HashMap::new(),
+            is_top_level: true,
         }
+    }
+
+    fn child(name: String) -> Self {
+        let mut compiler = Compiler::new(name);
+        compiler.is_top_level = false;
+        compiler
     }
 
     pub fn compile(program: &Program) -> CodeBlock {
         let mut compiler = Compiler::new("<script>".into());
-        for stmt in &program.body {
+        let (start, is_strict) = detect_use_strict(&program.body);
+        compiler.code.is_strict = is_strict;
+        for stmt in &program.body[start..] {
+            compiler.compile_statement(stmt);
+        }
+        compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+        compiler.code
+    }
+
+    /// Compile code for eval() — returns the completion value of the last expression.
+    pub fn compile_eval(program: &Program) -> CodeBlock {
+        let mut compiler = Compiler::new("<eval>".into());
+        let (start, is_strict) = detect_use_strict(&program.body);
+        compiler.code.is_strict = is_strict;
+        let body = &program.body[start..];
+        let len = body.len();
+        for (i, stmt) in body.iter().enumerate() {
+            if i + 1 == len
+                && let StatementKind::ExpressionStatement(expr) = &stmt.kind
+            {
+                let reg = compiler.compile_expression(expr);
+                compiler.code.emit(Instruction::abx(Opcode::Return, reg, 0));
+                return compiler.code;
+            }
             compiler.compile_statement(stmt);
         }
         compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
@@ -358,6 +389,11 @@ impl Compiler {
                     r
                 };
                 self.compile_expression_to(init, reg);
+                if self.is_top_level {
+                    let name_idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+                }
             }
             PatternKind::ArrayPattern { elements, .. } => {
                 let arr_reg = self.compile_expression(init);
@@ -510,7 +546,7 @@ impl Compiler {
 
     fn compile_function(&mut self, func: &Function) -> u16 {
         let name = func.id.as_deref().unwrap_or("<anonymous>");
-        let mut inner = Compiler::new(name.to_string());
+        let mut inner = Compiler::child(name.to_string());
         inner.code.param_count = func.params.len() as u16;
         inner.code.is_async = func.is_async;
         inner.code.is_generator = func.is_generator;
@@ -524,7 +560,9 @@ impl Compiler {
 
         match &func.body {
             FunctionBody::Block(stmts) => {
-                for stmt in stmts {
+                let (start, is_strict) = detect_use_strict(stmts);
+                inner.code.is_strict = is_strict;
+                for stmt in &stmts[start..] {
                     inner.compile_statement(stmt);
                 }
                 inner.code.emit(Instruction::op_only(Opcode::ReturnUndef));
@@ -1138,6 +1176,25 @@ fn member_property_name(property: &MemberProperty) -> String {
     }
 }
 
+fn detect_use_strict(stmts: &[Statement]) -> (usize, bool) {
+    let Some(first) = stmts.first() else {
+        return (0, false);
+    };
+    if is_use_strict_directive(first) {
+        (1, true)
+    } else {
+        (0, false)
+    }
+}
+
+fn is_use_strict_directive(stmt: &Statement) -> bool {
+    matches!(
+        &stmt.kind,
+        StatementKind::ExpressionStatement(expr)
+            if matches!(&expr.kind, ExpressionKind::StringLiteral(s) if s == "use strict")
+    )
+}
+
 fn property_key_name(key: &PropertyKey) -> String {
     match key {
         PropertyKey::Identifier(name) => name.clone(),
@@ -1277,5 +1334,20 @@ mod tests {
         let code = compile("42;");
         let last = code.bytecode.last().unwrap();
         assert_eq!(last.opcode(), Opcode::ReturnUndef);
+    }
+
+    #[test]
+    fn use_strict_sets_flag() {
+        let code = compile(r#""use strict"; 42;"#);
+        assert!(code.is_strict);
+    }
+
+    #[test]
+    fn compile_eval_returns_last_expression() {
+        let program = Parser::parse("1 + 2;").expect("parse failed");
+        let code = Compiler::compile_eval(&program);
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Return));
+        assert!(!opcodes.contains(&Opcode::ReturnUndef));
     }
 }

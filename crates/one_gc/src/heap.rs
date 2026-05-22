@@ -165,6 +165,18 @@ impl Heap {
         })
     }
 
+    pub fn should_collect(&self) -> bool {
+        self.bytes_allocated >= self.gc_threshold
+    }
+
+    pub fn grow_threshold(&mut self) {
+        self.gc_threshold = (self.bytes_allocated * 2).max(1024 * 1024);
+    }
+
+    pub fn set_gc_threshold(&mut self, threshold: usize) {
+        self.gc_threshold = threshold;
+    }
+
     pub fn stats(&self) -> HeapStats {
         HeapStats {
             bytes_allocated: self.bytes_allocated,

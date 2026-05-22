@@ -51,7 +51,9 @@ dependencies = [
 name = "one_runtime"
 version = "0.1.0"
 dependencies = [
+ "one_compiler",
  "one_core",
+ "one_parser",
  "one_vm",
 ]
 

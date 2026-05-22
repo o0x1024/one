@@ -390,8 +390,51 @@ impl Vm {
 
     /// Allocate a JsObject on the heap and return a JsValue pointing to it
     pub fn alloc_object(&mut self, obj: JsObject) -> JsValue {
+        if self.heap.should_collect() {
+            self.run_gc();
+        }
         let ptr = self.heap.alloc(obj);
         JsValue::from_object_raw(ptr as u64)
+    }
+
+    fn run_gc(&mut self) {
+        let mut roots = Vec::new();
+        self.collect_gc_roots(&mut roots);
+        self.heap.collect(&roots);
+        self.heap.grow_threshold();
+    }
+
+    fn collect_gc_roots(&self, roots: &mut Vec<*const u8>) {
+        for val in &self.stack {
+            Self::push_object_root(roots, *val);
+        }
+        for val in self.globals.values() {
+            Self::push_object_root(roots, *val);
+        }
+        for frame in &self.frames {
+            Self::push_object_root(roots, frame.this_val);
+        }
+        for (promise_val, _) in &self.promise_methods {
+            Self::push_object_root(roots, *promise_val);
+        }
+        for (promise_val, _) in &self.promise_resolvers {
+            Self::push_object_root(roots, *promise_val);
+        }
+    }
+
+    fn push_object_root(roots: &mut Vec<*const u8>, val: JsValue) {
+        if val.is_object()
+            && let Some(raw) = val.as_object_raw()
+            && raw & 0xFFFF_0000 != HOST_SENTINEL_MASK
+            && raw & 0xFFFF_0000 != PROMISE_METHOD_MASK
+            && raw & 0xFFFF_0000 != PROMISE_RESOLVER_MASK
+        {
+            roots.push(raw as *const u8);
+        }
+    }
+
+    pub fn set_gc_threshold(&mut self, threshold: usize) {
+        self.heap.set_gc_threshold(threshold);
     }
 
     /// Get a reference to a JsObject from a JsValue
@@ -426,11 +469,9 @@ impl Vm {
         }
     }
 
-    /// Execute a CodeBlock
-    pub fn execute(&mut self, code: &CodeBlock) -> OneResult<JsValue> {
-        self.exception_stack.clear();
-        self.current_exception = None;
-
+    /// Execute a CodeBlock without draining microtasks (used by eval).
+    pub fn execute_inner(&mut self, code: &CodeBlock) -> OneResult<JsValue> {
+        let stop_depth = self.frames.len();
         let base = self.stack.len();
         self.stack
             .resize(base + code.register_count as usize, JsValue::undefined());
@@ -444,13 +485,17 @@ impl Vm {
             this_val: JsValue::undefined(),
         });
 
-        let result = self.run()?;
-        self.drain_microtasks()?;
-        Ok(result)
+        self.run_until(Some(stop_depth))
     }
 
-    fn run(&mut self) -> OneResult<JsValue> {
-        self.run_until(None)
+    /// Execute a CodeBlock
+    pub fn execute(&mut self, code: &CodeBlock) -> OneResult<JsValue> {
+        self.exception_stack.clear();
+        self.current_exception = None;
+
+        let result = self.execute_inner(code)?;
+        self.drain_microtasks()?;
+        Ok(result)
     }
 
     fn run_until(&mut self, stop_depth: Option<usize>) -> OneResult<JsValue> {
@@ -595,11 +640,14 @@ impl Vm {
                             ));
                         }
                     };
-                    let value = self
-                        .globals
-                        .get(&name)
-                        .copied()
-                        .unwrap_or(JsValue::undefined());
+                    let value = if name == "this" && code.is_strict {
+                        JsValue::undefined()
+                    } else {
+                        self.globals
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(JsValue::undefined())
+                    };
                     self.stack[base + dest as usize] = value;
                 }
                 Opcode::SetGlobal => {

@@ -4,6 +4,16 @@ use one_compiler::CodeBlock;
 use one_core::JsValue;
 use one_gc::Trace;
 
+const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
+const PROMISE_METHOD_MASK: u64 = 0xBEEF_0000;
+const PROMISE_RESOLVER_MASK: u64 = 0xCAFE_0000;
+
+fn is_gc_object(raw: u64) -> bool {
+    raw & 0xFFFF_0000 != HOST_SENTINEL_MASK
+        && raw & 0xFFFF_0000 != PROMISE_METHOD_MASK
+        && raw & 0xFFFF_0000 != PROMISE_RESOLVER_MASK
+}
+
 #[derive(Debug)]
 pub struct JsObject {
     /// Properties stored as a simple HashMap (Shape system comes later)
@@ -54,13 +64,41 @@ impl Trace for JsObject {
     fn trace(&self, tracer: &mut dyn one_gc::trace::Tracer) {
         for prop in self.properties.values() {
             if prop.value.is_object()
-                && let Some(ptr) = prop.value.as_object_raw()
+                && let Some(raw) = prop.value.as_object_raw()
+                && is_gc_object(raw)
             {
-                tracer.mark(ptr as *const u8);
+                tracer.mark(raw as *const u8);
             }
         }
-        if let Some(proto) = self.prototype {
+        if let Some(proto) = self.prototype
+            && is_gc_object(proto as u64)
+        {
             tracer.mark(proto as *const u8);
+        }
+        if let ObjectKind::Promise(state) = &self.kind {
+            match state {
+                PromiseState::Pending {
+                    on_fulfilled,
+                    on_rejected,
+                } => {
+                    for callback in on_fulfilled.iter().chain(on_rejected) {
+                        if callback.is_object()
+                            && let Some(raw) = callback.as_object_raw()
+                            && is_gc_object(raw)
+                        {
+                            tracer.mark(raw as *const u8);
+                        }
+                    }
+                }
+                PromiseState::Fulfilled(val) | PromiseState::Rejected(val) => {
+                    if val.is_object()
+                        && let Some(raw) = val.as_object_raw()
+                        && is_gc_object(raw)
+                    {
+                        tracer.mark(raw as *const u8);
+                    }
+                }
+            }
         }
     }
 }

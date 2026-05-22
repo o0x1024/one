@@ -122,14 +122,20 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    fn eval_promise(src: &str) -> JsValue {
+    fn run(src: &str) -> JsValue {
         let mut engine = Engine::new();
+        engine.eval(src).expect("execution failed")
+    }
+
+    fn run_with_gc_threshold(src: &str, threshold: usize) -> JsValue {
+        let mut engine = Engine::new();
+        engine.vm_mut().set_gc_threshold(threshold);
         engine.eval(src).expect("execution failed")
     }
 
     #[test]
     fn promise_resolve() {
-        let result = eval_promise(
+        let result = run(
             r#"
             result = 0;
             let p = Promise.resolve(42);
@@ -142,7 +148,7 @@ mod tests {
 
     #[test]
     fn promise_reject_catch() {
-        let result = eval_promise(
+        let result = run(
             r#"
             result = 0;
             let p = Promise.reject("error");
@@ -155,7 +161,7 @@ mod tests {
 
     #[test]
     fn promise_then_chain() {
-        let result = eval_promise(
+        let result = run(
             r#"
             result = 0;
             Promise.resolve(10).then(function(v) {
@@ -169,7 +175,7 @@ mod tests {
 
     #[test]
     fn promise_constructor() {
-        let result = eval_promise(
+        let result = run(
             r#"
             result = 0;
             let p = new Promise(function(resolve, reject) {
@@ -178,6 +184,54 @@ mod tests {
             p.then(function(v) { result = v; });
             return result;
         "#,
+        );
+        assert!(result.to_number() == 99.0);
+    }
+
+    #[test]
+    fn eval_basic() {
+        let result = run("return eval('1 + 2');");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn eval_variable_access() {
+        let result = run("let x = 10; return eval('x + 5');");
+        assert!(result.to_number() == 15.0);
+    }
+
+    #[test]
+    fn eval_string() {
+        let result = run(r#"return eval('"hello"');"#);
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn eval_non_string_passthrough() {
+        let result = run("return eval(42);");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn use_strict_detection() {
+        let result = run(r#""use strict"; return 42;"#);
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn gc_survives_collection() {
+        let result = run_with_gc_threshold(
+            r#"
+            let last = 0;
+            let i = 0;
+            while (i < 100) {
+                let obj = {value: i};
+                last = obj.value;
+                i = i + 1;
+            }
+            return last;
+        "#,
+            4096,
         );
         assert!(result.to_number() == 99.0);
     }
