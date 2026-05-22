@@ -1,4 +1,5 @@
 mod expr;
+mod prescan;
 mod stmt;
 
 use crate::ast::*;
@@ -6,10 +7,33 @@ use crate::lexer::Lexer;
 use crate::span::{BytePos, Span};
 use crate::token::{Token, TokenKind};
 
+#[derive(Debug, Clone)]
+pub struct ParserConfig {
+    pub lazy: bool,
+    pub typescript: bool,
+    pub jsx: bool,
+    pub source_type: SourceType,
+}
+
+impl Default for ParserConfig {
+    fn default() -> Self {
+        ParserConfig {
+            lazy: false,
+            typescript: false,
+            jsx: false,
+            source_type: SourceType::Script,
+        }
+    }
+}
+
 pub struct Parser<'a> {
     pub(super) lexer: Lexer<'a>,
     pub(super) current: Token,
     pub(super) previous_end: BytePos,
+    lazy: bool,
+    #[allow(dead_code)]
+    source: &'a str,
+    source_type: SourceType,
 }
 
 #[derive(Debug)]
@@ -22,6 +46,10 @@ pub type ParseResult<T> = Result<T, ParseError>;
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
+        Self::new_with_config(source, ParserConfig::default())
+    }
+
+    pub fn new_with_config(source: &'a str, config: ParserConfig) -> Self {
         let mut lexer = Lexer::new(source);
         let current = lexer.next_token();
         let previous_end = current.span.start;
@@ -29,23 +57,69 @@ impl<'a> Parser<'a> {
             lexer,
             current,
             previous_end,
+            lazy: config.lazy,
+            source,
+            source_type: config.source_type,
         }
     }
 
-    pub fn parse(source: &'a str) -> ParseResult<Program> {
-        let mut parser = Self::new(source);
+    fn new_inner(source: &'a str, lazy: bool) -> Self {
+        Self::new_with_config(
+            source,
+            ParserConfig {
+                lazy,
+                ..ParserConfig::default()
+            },
+        )
+    }
+
+    pub fn parse(source: &str) -> ParseResult<Program> {
+        Self::parse_with_config(source, ParserConfig::default())
+    }
+
+    pub fn parse_with_config(source: &str, config: ParserConfig) -> ParseResult<Program> {
+        let mut parser = Parser::new_with_config(source, config);
         parser.parse_program()
+    }
+
+    /// Parse a previously pre-scanned function body.
+    /// Called when the function is first invoked at runtime.
+    pub fn parse_lazy_function(
+        source: &str,
+        lazy: &LazyFunctionBody,
+    ) -> ParseResult<Vec<Statement>> {
+        let body_source = &source[lazy.source_start as usize..lazy.source_end as usize];
+        let mut parser = Parser::new_inner(body_source, false);
+        parser.parse_statement_list()
+    }
+
+    pub(super) fn is_lazy(&self) -> bool {
+        self.lazy
+    }
+
+    pub(super) fn parse_function_block_body(&mut self) -> ParseResult<FunctionBody> {
+        self.expect(&TokenKind::LBrace)?;
+        if self.lazy {
+            Ok(FunctionBody::Lazy(prescan::PreScanner::scan_function_body(
+                self,
+            )?))
+        } else {
+            let stmts = self.parse_statement_list()?;
+            self.expect(&TokenKind::RBrace)?;
+            Ok(FunctionBody::Block(stmts))
+        }
     }
 
     pub fn parse_program(&mut self) -> ParseResult<Program> {
         let start = self.current.span.start;
+        let source_type = self.source_type;
         let mut body = Vec::new();
         while !self.at_eof() {
             body.push(self.parse_statement()?);
         }
         Ok(Program {
             body,
-            source_type: SourceType::Script,
+            source_type,
             span: self.span_from(start),
         })
     }
@@ -408,5 +482,136 @@ mod tests {
     #[test]
     fn parse_complex_expression() {
         let _prog = parse("foo.bar(1 + 2, [3, 4], { a: 5 });");
+    }
+
+    #[test]
+    fn lazy_parse_skips_function_body() {
+        let config = ParserConfig {
+            lazy: true,
+            ..Default::default()
+        };
+        let prog = Parser::parse_with_config("function foo() { return 42; }", config).unwrap();
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => {
+                    assert!(matches!(&func.body, FunctionBody::Lazy(_)));
+                }
+                _ => panic!("expected function declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn lazy_parse_records_metadata() {
+        let config = ParserConfig {
+            lazy: true,
+            ..Default::default()
+        };
+        let prog = Parser::parse_with_config(
+            "function foo() { eval('x'); arguments[0]; }",
+            config,
+        )
+        .unwrap();
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => match &func.body {
+                    FunctionBody::Lazy(lazy) => {
+                        assert!(lazy.has_eval);
+                        assert!(lazy.has_arguments);
+                        assert!(!lazy.has_with);
+                    }
+                    _ => panic!("expected lazy body"),
+                },
+                _ => panic!("expected function declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn lazy_body_can_be_reparsed() {
+        let source = "function foo() { return 42; }";
+        let config = ParserConfig {
+            lazy: true,
+            ..Default::default()
+        };
+        let prog = Parser::parse_with_config(source, config).unwrap();
+
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => match &func.body {
+                    FunctionBody::Lazy(lazy) => {
+                        let stmts = Parser::parse_lazy_function(source, lazy).unwrap();
+                        assert_eq!(stmts.len(), 1);
+                        assert!(matches!(
+                            &stmts[0].kind,
+                            StatementKind::ReturnStatement(_)
+                        ));
+                    }
+                    _ => panic!("expected lazy body"),
+                },
+                _ => panic!("expected function declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn non_lazy_mode_fully_parses() {
+        let prog = Parser::parse("function foo() { return 42; }").unwrap();
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => {
+                    assert!(matches!(&func.body, FunctionBody::Block(_)));
+                }
+                _ => panic!("expected function declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn top_level_code_always_fully_parsed() {
+        let config = ParserConfig {
+            lazy: true,
+            ..Default::default()
+        };
+        let prog = Parser::parse_with_config("let x = 1 + 2;", config).unwrap();
+        assert_eq!(prog.body.len(), 1);
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::VariableDeclaration { declarations, .. } => {
+                    assert!(declarations[0].init.is_some());
+                }
+                _ => panic!("expected var decl"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn nested_braces_handled() {
+        let config = ParserConfig {
+            lazy: true,
+            ..Default::default()
+        };
+        let prog = Parser::parse_with_config(
+            "function foo() { if (true) { return { a: 1 }; } }",
+            config,
+        )
+        .unwrap();
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => match &func.body {
+                    FunctionBody::Lazy(lazy) => {
+                        assert!(lazy.source_end > lazy.source_start);
+                    }
+                    _ => panic!("expected lazy body"),
+                },
+                _ => panic!("expected function declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
     }
 }

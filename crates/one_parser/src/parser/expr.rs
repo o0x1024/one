@@ -655,10 +655,14 @@ impl Parser<'_> {
         start: BytePos,
     ) -> ParseResult<Expression> {
         let body = if self.at(&TokenKind::LBrace) {
-            self.advance();
-            let stmts = self.parse_statement_list()?;
-            self.expect(&TokenKind::RBrace)?;
-            FunctionBody::Block(stmts)
+            if self.is_lazy() {
+                self.parse_function_block_body()?
+            } else {
+                self.advance();
+                let stmts = self.parse_statement_list()?;
+                self.expect(&TokenKind::RBrace)?;
+                FunctionBody::Block(stmts)
+            }
         } else {
             let expr = self.parse_assignment_expression()?;
             FunctionBody::Expression(Box::new(expr))
@@ -744,9 +748,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_function_params()?;
         self.expect(&TokenKind::RParen)?;
-        self.expect(&TokenKind::LBrace)?;
-        let body = FunctionBody::Block(self.parse_statement_list()?);
-        self.expect(&TokenKind::RBrace)?;
+        let body = self.parse_function_block_body()?;
         Ok(Function {
             id,
             params,
@@ -767,9 +769,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_function_params()?;
         self.expect(&TokenKind::RParen)?;
-        self.expect(&TokenKind::LBrace)?;
-        let body = FunctionBody::Block(self.parse_statement_list()?);
-        self.expect(&TokenKind::RBrace)?;
+        let body = self.parse_function_block_body()?;
         Ok(Function {
             id,
             params,

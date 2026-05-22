@@ -35,6 +35,10 @@ impl<'a> Lexer<'a> {
             col: 1,
         }
     }
+
+    pub fn position(&self) -> usize {
+        self.pos
+    }
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
         let start = self.pos;

@@ -256,6 +256,21 @@ pub struct Function {
 pub enum FunctionBody {
     Block(Vec<super::Statement>),
     Expression(Box<Expression>),
+    /// Lazy: function body was pre-scanned but not yet parsed.
+    /// Contains the source range for deferred parsing.
+    Lazy(LazyFunctionBody),
+}
+
+#[derive(Debug, Clone)]
+pub struct LazyFunctionBody {
+    /// Byte range of the function body in source (including braces)
+    pub source_start: u32,
+    pub source_end: u32,
+    /// Pre-scan metadata
+    pub has_eval: bool,
+    pub has_arguments: bool,
+    pub has_with: bool,
+    pub is_strict: bool,
 }
 
 #[derive(Debug, Clone)]
