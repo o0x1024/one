@@ -1,0 +1,28 @@
+# one/Cargo.toml
+[workspace]
+resolver = "2"
+members = [
+    "crates/one_core",
+    "crates/one_parser",
+    "crates/one_compiler",
+    "crates/one_gc",
+    "crates/one_vm",
+    "crates/one_runtime",
+    "crates/one_engine",
+    "crates/one_cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/user/one"
+
+[workspace.dependencies]
+one_core = { path = "crates/one_core" }
+one_parser = { path = "crates/one_parser" }
+one_compiler = { path = "crates/one_compiler" }
+one_gc = { path = "crates/one_gc" }
+one_vm = { path = "crates/one_vm" }
+one_runtime = { path = "crates/one_runtime" }
+one_engine = { path = "crates/one_engine" }
