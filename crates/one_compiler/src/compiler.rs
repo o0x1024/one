@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use one_parser::ast::*;
 
-use crate::codeblock::{CodeBlock, Constant};
+use crate::codeblock::{CodeBlock, Constant, ImportSpec, ModuleExport, ModuleImport, ModuleInfo};
 use crate::opcode::{Instruction, Opcode};
 
 pub struct Compiler {
@@ -31,7 +31,12 @@ impl Compiler {
     }
 
     pub fn compile(program: &Program) -> CodeBlock {
-        let mut compiler = Compiler::new("<script>".into());
+        let name = if program.source_type == SourceType::Module {
+            "<module>".into()
+        } else {
+            "<script>".into()
+        };
+        let mut compiler = Compiler::new(name);
         let (start, is_strict) = detect_use_strict(&program.body);
         compiler.code.is_strict = is_strict;
         for stmt in &program.body[start..] {
@@ -39,6 +44,10 @@ impl Compiler {
         }
         compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
         compiler.code
+    }
+
+    pub fn compile_module(program: &Program) -> CodeBlock {
+        Self::compile(program)
     }
 
     /// Compile code for eval() — returns the completion value of the last expression.
@@ -75,6 +84,26 @@ impl Compiler {
         if self.next_register > 0 {
             self.next_register -= 1;
         }
+    }
+
+    fn module_imports(&mut self) -> &mut Vec<ModuleImport> {
+        if self.code.module_info.is_none() {
+            self.code.module_info = Some(Box::new(ModuleInfo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            }));
+        }
+        &mut self.code.module_info.as_mut().unwrap().imports
+    }
+
+    fn module_exports(&mut self) -> &mut Vec<ModuleExport> {
+        if self.code.module_info.is_none() {
+            self.code.module_info = Some(Box::new(ModuleInfo {
+                imports: Vec::new(),
+                exports: Vec::new(),
+            }));
+        }
+        &mut self.code.module_info.as_mut().unwrap().exports
     }
 
     fn add_string(&mut self, s: &str) -> u16 {
@@ -369,10 +398,121 @@ impl Compiler {
                 }
                 self.free_reg();
             }
-            DeclarationKind::ImportDeclaration { .. }
-            | DeclarationKind::ExportNamedDeclaration { .. }
-            | DeclarationKind::ExportDefaultDeclaration(_)
-            | DeclarationKind::ExportAllDeclaration { .. } => {}
+            DeclarationKind::ImportDeclaration { specifiers, source } => {
+                let specs = specifiers
+                    .iter()
+                    .map(|s| match s {
+                        ImportSpecifier::Default { local, .. } => {
+                            ImportSpec::Default(local.clone())
+                        }
+                        ImportSpecifier::Named {
+                            local,
+                            imported,
+                            ..
+                        } => ImportSpec::Named {
+                            local: local.clone(),
+                            imported: imported.clone(),
+                        },
+                        ImportSpecifier::Namespace { local, .. } => {
+                            ImportSpec::Namespace(local.clone())
+                        }
+                    })
+                    .collect();
+                self.module_imports().push(ModuleImport {
+                    source: source.clone(),
+                    specifiers: specs,
+                });
+            }
+            DeclarationKind::ExportNamedDeclaration {
+                declaration,
+                specifiers,
+                source: _,
+            } => {
+                if let Some(decl) = declaration {
+                    self.compile_declaration(decl);
+                    self.record_export_from_declaration(decl);
+                }
+                for spec in specifiers {
+                    self.module_exports().push(ModuleExport {
+                        local: spec.local.clone(),
+                        exported: spec.exported.clone(),
+                    });
+                }
+            }
+            DeclarationKind::ExportDefaultDeclaration(default) => {
+                match default {
+                    ExportDefault::Expression(expr) => {
+                        let reg = self.compile_expression(expr);
+                        let name_idx = self.add_string("__default__");
+                        self.code
+                            .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+                        self.mirrored_globals.insert("__default__".to_string());
+                        self.free_reg();
+                    }
+                    ExportDefault::FunctionDeclaration(func) => {
+                        let idx = self.compile_function(func);
+                        let closure_reg = self.alloc_reg();
+                        self.code.emit(Instruction::abx(
+                            Opcode::CreateClosure,
+                            closure_reg,
+                            idx,
+                        ));
+                        let name_idx = self.add_string("__default__");
+                        self.code.emit(Instruction::abx(
+                            Opcode::SetGlobal,
+                            closure_reg,
+                            name_idx,
+                        ));
+                        self.mirrored_globals.insert("__default__".to_string());
+                        self.free_reg();
+                    }
+                    ExportDefault::ClassDeclaration(class) => {
+                        let ctor_reg = self.compile_class(class);
+                        let name_idx = self.add_string("__default__");
+                        self.code
+                            .emit(Instruction::abx(Opcode::SetGlobal, ctor_reg, name_idx));
+                        self.mirrored_globals.insert("__default__".to_string());
+                        self.free_reg();
+                    }
+                }
+                self.module_exports().push(ModuleExport {
+                    local: "__default__".to_string(),
+                    exported: "default".to_string(),
+                });
+            }
+            DeclarationKind::ExportAllDeclaration { .. } => {}
+        }
+    }
+
+    fn record_export_from_declaration(&mut self, decl: &Declaration) {
+        match &decl.kind {
+            DeclarationKind::VariableDeclaration { declarations, .. } => {
+                for declarator in declarations {
+                    if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
+                        self.module_exports().push(ModuleExport {
+                            local: name.clone(),
+                            exported: name.clone(),
+                        });
+                    }
+                }
+            }
+            DeclarationKind::FunctionDeclaration(func) => {
+                if let Some(name) = &func.id {
+                    self.module_exports().push(ModuleExport {
+                        local: name.clone(),
+                        exported: name.clone(),
+                    });
+                }
+            }
+            DeclarationKind::ClassDeclaration(class) => {
+                if let Some(name) = &class.id {
+                    self.module_exports().push(ModuleExport {
+                        local: name.clone(),
+                        exported: name.clone(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 

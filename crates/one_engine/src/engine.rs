@@ -1,17 +1,34 @@
-use one_compiler::Compiler;
+use std::collections::HashMap;
+
+use one_compiler::{Compiler, ImportSpec, ModuleExport};
 use one_core::{CompileError, JsValue, OneError, OneResult};
 use one_parser::parser::Parser;
 use one_vm::Vm;
 
 pub struct Engine {
     vm: Vm,
+    registered_modules: HashMap<String, String>,
+    module_cache: HashMap<String, HashMap<String, JsValue>>,
+    baseline_globals: HashMap<String, JsValue>,
 }
 
 impl Engine {
     pub fn new() -> Self {
         let mut vm = Vm::new();
         one_runtime::install_builtins(&mut vm);
-        Engine { vm }
+        let baseline_globals = vm.snapshot_globals();
+        Engine {
+            vm,
+            registered_modules: HashMap::new(),
+            module_cache: HashMap::new(),
+            baseline_globals,
+        }
+    }
+
+    /// Register a virtual module by specifier name.
+    pub fn register_module(&mut self, name: &str, source: &str) {
+        self.registered_modules
+            .insert(name.to_string(), source.to_string());
     }
 
     /// Execute JavaScript source code
@@ -26,6 +43,118 @@ impl Engine {
         })?;
         let code = Compiler::compile(&program);
         self.vm.execute(&code)
+    }
+
+    /// Execute an ES module.
+    pub fn eval_module(&mut self, source: &str, path: &str) -> OneResult<JsValue> {
+        let program = Parser::parse_module(source).map_err(|e| {
+            OneError::CompileError(CompileError {
+                message: e.message,
+                file: Some(path.into()),
+                line: 0,
+                column: 0,
+            })
+        })?;
+        let code = Compiler::compile_module(&program);
+
+        if let Some(module_info) = &code.module_info {
+            for import in &module_info.imports {
+                let exports = self.load_module(&import.source, path)?;
+                self.apply_imports(import, &exports);
+            }
+        }
+
+        self.vm.execute(&code)
+    }
+
+    fn load_module(
+        &mut self,
+        specifier: &str,
+        _referrer: &str,
+    ) -> OneResult<HashMap<String, JsValue>> {
+        if let Some(exports) = self.module_cache.get(specifier) {
+            return Ok(exports.clone());
+        }
+
+        let source = self.registered_modules.get(specifier).ok_or_else(|| {
+            OneError::InternalError(format!("Module not found: {specifier}"))
+        })?;
+
+        let saved_globals = self.vm.snapshot_globals();
+        self.vm.restore_globals(self.baseline_globals.clone());
+
+        let program = Parser::parse_module(source).map_err(|e| {
+            OneError::CompileError(CompileError {
+                message: e.message,
+                file: Some(specifier.into()),
+                line: 0,
+                column: 0,
+            })
+        })?;
+        let module_code = Compiler::compile_module(&program);
+
+        if let Some(module_info) = &module_code.module_info {
+            for import in &module_info.imports {
+                let exports = self.load_module(&import.source, specifier)?;
+                self.apply_imports(import, &exports);
+            }
+        }
+
+        self.vm.execute(&module_code)?;
+
+        let export_specs = module_code
+            .module_info
+            .as_ref()
+            .map(|info| info.exports.as_slice())
+            .unwrap_or(&[]);
+        let exports = self.collect_exports(export_specs);
+        self.module_cache
+            .insert(specifier.to_string(), exports.clone());
+
+        self.vm.restore_globals(saved_globals);
+        Ok(exports)
+    }
+
+    fn apply_imports(
+        &mut self,
+        import: &one_compiler::ModuleImport,
+        exports: &HashMap<String, JsValue>,
+    ) {
+        for spec in &import.specifiers {
+            match spec {
+                ImportSpec::Default(local) => {
+                    if let Some(val) = exports.get("default") {
+                        self.vm.set_global(local, *val);
+                    }
+                }
+                ImportSpec::Named { local, imported } => {
+                    if let Some(val) = exports.get(imported) {
+                        self.vm.set_global(local, *val);
+                    }
+                }
+                ImportSpec::Namespace(local) => {
+                    let ns = self.create_namespace_object(exports);
+                    self.vm.set_global(local, ns);
+                }
+            }
+        }
+    }
+
+    fn collect_exports(&self, export_specs: &[ModuleExport]) -> HashMap<String, JsValue> {
+        let mut exports = HashMap::new();
+        for spec in export_specs {
+            let val = self.vm.get_global(&spec.local);
+            exports.insert(spec.exported.clone(), val);
+        }
+        exports
+    }
+
+    fn create_namespace_object(&mut self, exports: &HashMap<String, JsValue>) -> JsValue {
+        let pairs: Vec<(String, JsValue)> = exports
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        self.vm.create_object_from_pairs(&pairs)
     }
 
     /// Execute JavaScript from a file path
@@ -61,7 +190,6 @@ impl Default for Engine {
         Self::new()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,5 +1079,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn module_export_import() {
+        let mut engine = Engine::new();
+        engine.register_module(
+            "math_utils",
+            r#"
+            export let PI = 3.14159;
+            export function double(x) { return x * 2; }
+        "#,
+        );
+
+        let result = engine
+            .eval_module(
+                r#"
+            import { PI, double } from "math_utils";
+            return PI + double(5);
+        "#,
+                "<test>",
+            )
+            .unwrap();
+        assert!((result.to_number() - 13.14159).abs() < 0.001);
+    }
+
+    #[test]
+    fn module_default_export() {
+        let mut engine = Engine::new();
+        engine.register_module(
+            "greeter",
+            r#"
+            export default function() { return 42; }
+        "#,
+        );
+
+        let result = engine
+            .eval_module(
+                r#"
+            import greet from "greeter";
+            return greet();
+        "#,
+                "<test>",
+            )
+            .unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn module_caching() {
+        let mut engine = Engine::new();
+        engine.register_module(
+            "counter",
+            r#"
+            export let count = 0;
+            count = count + 1;
+        "#,
+        );
+
+        let r1 = engine
+            .eval_module(
+                r#"import { count } from "counter"; return count;"#,
+                "<test>",
+            )
+            .unwrap();
+        let r2 = engine
+            .eval_module(
+                r#"import { count } from "counter"; return count;"#,
+                "<test2>",
+            )
+            .unwrap();
+        assert!(r1.to_number() == 1.0);
+        assert!(r2.to_number() == 1.0);
     }
 }

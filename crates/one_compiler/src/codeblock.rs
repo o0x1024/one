@@ -26,6 +26,32 @@ pub struct CodeBlock {
     pub inner_functions: Vec<CodeBlock>,
     pub source_map: Vec<SourceMapping>,
     pub exception_handlers: Vec<ExceptionHandler>,
+    pub module_info: Option<Box<ModuleInfo>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    pub imports: Vec<ModuleImport>,
+    pub exports: Vec<ModuleExport>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleImport {
+    pub source: String,
+    pub specifiers: Vec<ImportSpec>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportSpec {
+    Default(String),
+    Named { local: String, imported: String },
+    Namespace(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleExport {
+    pub local: String,
+    pub exported: String,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +85,7 @@ impl CodeBlock {
             inner_functions: Vec::new(),
             source_map: Vec::new(),
             exception_handlers: Vec::new(),
+            module_info: None,
         }
     }
 

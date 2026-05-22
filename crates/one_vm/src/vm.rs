@@ -1293,6 +1293,22 @@ impl Vm {
     pub fn set_global(&mut self, name: &str, val: JsValue) {
         self.globals.insert(name.to_string(), val);
     }
+
+    pub fn snapshot_globals(&self) -> HashMap<String, JsValue> {
+        self.globals.clone()
+    }
+
+    pub fn restore_globals(&mut self, globals: HashMap<String, JsValue>) {
+        self.globals = globals;
+    }
+
+    pub fn create_object_from_pairs(&mut self, pairs: &[(String, JsValue)]) -> JsValue {
+        let mut obj = JsObject::new();
+        for (key, val) in pairs {
+            obj.set_property(key.clone(), *val);
+        }
+        self.alloc_object(obj)
+    }
 }
 
 impl Default for Vm {

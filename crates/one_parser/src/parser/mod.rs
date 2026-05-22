@@ -1,4 +1,5 @@
 mod expr;
+mod module;
 mod prescan;
 mod stmt;
 
@@ -77,6 +78,16 @@ impl<'a> Parser<'a> {
         Self::parse_with_config(source, ParserConfig::default())
     }
 
+    pub fn parse_module(source: &str) -> ParseResult<Program> {
+        Self::parse_with_config(
+            source,
+            ParserConfig {
+                source_type: SourceType::Module,
+                ..ParserConfig::default()
+            },
+        )
+    }
+
     pub fn parse_with_config(source: &str, config: ParserConfig) -> ParseResult<Program> {
         let mut parser = Parser::new_with_config(source, config);
         parser.parse_program()
@@ -95,6 +106,10 @@ impl<'a> Parser<'a> {
 
     pub(super) fn is_lazy(&self) -> bool {
         self.lazy
+    }
+
+    pub(super) fn is_module(&self) -> bool {
+        self.source_type == SourceType::Module
     }
 
     pub(super) fn parse_function_block_body(&mut self) -> ParseResult<FunctionBody> {
@@ -635,6 +650,93 @@ mod tests {
                 _ => panic!("expected function declaration"),
             },
             _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn parse_import_default() {
+        let program = Parser::parse_module(r#"import foo from "module";"#).unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::ImportDeclaration { specifiers, source } => {
+                    assert_eq!(source, "module");
+                    assert_eq!(specifiers.len(), 1);
+                    assert!(matches!(
+                        &specifiers[0],
+                        ImportSpecifier::Default { local, .. } if local == "foo"
+                    ));
+                }
+                _ => panic!("expected import declaration"),
+            },
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[test]
+    fn parse_import_named() {
+        let program = Parser::parse_module(r#"import { a, b } from "module";"#).unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::ImportDeclaration { specifiers, .. } => {
+                    assert_eq!(specifiers.len(), 2);
+                }
+                _ => panic!("expected import declaration"),
+            },
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[test]
+    fn parse_export_let() {
+        let program = Parser::parse_module("export let x = 42;").unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::ExportNamedDeclaration { declaration, .. } => {
+                    assert!(declaration.is_some());
+                }
+                _ => panic!("expected export declaration"),
+            },
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[test]
+    fn parse_export_default() {
+        let program = Parser::parse_module("export default 42;").unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => {
+                assert!(matches!(
+                    &decl.kind,
+                    DeclarationKind::ExportDefaultDeclaration(_)
+                ));
+            }
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[test]
+    fn parse_export_function() {
+        let program =
+            Parser::parse_module("export function hello() { return 1; }").unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::ExportNamedDeclaration { declaration, .. } => {
+                    assert!(matches!(
+                        declaration.as_deref(),
+                        Some(Declaration {
+                            kind: DeclarationKind::FunctionDeclaration(_),
+                            ..
+                        })
+                    ));
+                }
+                _ => panic!("expected export declaration"),
+            },
+            _ => panic!("expected declaration statement"),
         }
     }
 }

@@ -46,6 +46,20 @@ impl Parser<'_> {
                     span: self.span_from(start),
                 })
             }
+            TokenKind::Import if self.is_module() => {
+                let decl = self.parse_import_declaration()?;
+                Ok(Statement {
+                    kind: StatementKind::Declaration(decl),
+                    span: self.span_from(start),
+                })
+            }
+            TokenKind::Export if self.is_module() => {
+                let decl = self.parse_export_declaration()?;
+                Ok(Statement {
+                    kind: StatementKind::Declaration(decl),
+                    span: self.span_from(start),
+                })
+            }
             TokenKind::If => self.parse_if_statement(),
             TokenKind::While => self.parse_while_statement(),
             TokenKind::Do => self.parse_do_while_statement(),
