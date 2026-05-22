@@ -4,7 +4,7 @@ use one_compiler::{CodeBlock, Constant, Opcode};
 use one_core::{JsValue, OneError, OneResult};
 use one_gc::Heap;
 
-use crate::object::{FunctionObject, JsObject, ObjectKind, PromiseState};
+use crate::object::{FunctionObject, JsObject, MapData, ObjectKind, PromiseState, SetData};
 
 const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
 const PROMISE_METHOD_MASK: u64 = 0xBEEF_0000;
@@ -57,6 +57,13 @@ pub struct Vm {
     promise_methods: Vec<(JsValue, PromiseMethodKind)>,
     promise_resolvers: Vec<(JsValue, PromiseResolverKind)>,
     array_prototype: Option<JsValue>,
+    map_prototype: Option<JsValue>,
+    set_prototype: Option<JsValue>,
+    date_prototype: Option<JsValue>,
+    regexp_prototype: Option<JsValue>,
+    symbol_counter: u32,
+    symbol_descriptions: Vec<Option<String>>,
+    global_symbols: HashMap<String, u32>,
 }
 
 impl Vm {
@@ -74,6 +81,13 @@ impl Vm {
             promise_methods: Vec::new(),
             promise_resolvers: Vec::new(),
             array_prototype: None,
+            map_prototype: None,
+            set_prototype: None,
+            date_prototype: None,
+            regexp_prototype: None,
+            symbol_counter: 0,
+            symbol_descriptions: Vec::new(),
+            global_symbols: HashMap::new(),
         }
     }
 
@@ -117,8 +131,72 @@ impl Vm {
         self.array_prototype = Some(proto);
     }
 
+    pub fn set_map_prototype(&mut self, proto: JsValue) {
+        self.map_prototype = Some(proto);
+    }
+
+    pub fn set_set_prototype(&mut self, proto: JsValue) {
+        self.set_prototype = Some(proto);
+    }
+
+    pub fn set_date_prototype(&mut self, proto: JsValue) {
+        self.date_prototype = Some(proto);
+    }
+
+    pub fn set_regexp_prototype(&mut self, proto: JsValue) {
+        self.regexp_prototype = Some(proto);
+    }
+
+    pub fn create_symbol(&mut self, description: Option<String>) -> u32 {
+        let id = self.symbol_counter;
+        self.symbol_counter += 1;
+        self.symbol_descriptions.push(description);
+        id
+    }
+
+    pub fn get_or_create_global_symbol(&mut self, key: &str) -> u32 {
+        if let Some(&id) = self.global_symbols.get(key) {
+            return id;
+        }
+        let id = self.create_symbol(Some(key.to_string()));
+        self.global_symbols.insert(key.to_string(), id);
+        id
+    }
+
     fn apply_array_prototype(&self, obj: &mut JsObject) {
         if let Some(proto_val) = self.array_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    fn apply_map_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.map_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    fn apply_set_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.set_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    fn apply_date_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.date_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    fn apply_regexp_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.regexp_prototype
             && let Some(raw) = proto_val.as_object_raw()
         {
             obj.set_prototype(Some(raw as *mut JsObject));
@@ -129,6 +207,40 @@ impl Vm {
         let mut obj = JsObject::with_kind(ObjectKind::Array { length });
         self.apply_array_prototype(&mut obj);
         self.alloc_object(obj)
+    }
+
+    pub fn new_map(&mut self) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::Map(MapData { entries: Vec::new() }));
+        self.apply_map_prototype(&mut obj);
+        self.alloc_object(obj)
+    }
+
+    pub fn new_set(&mut self) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::Set(SetData { values: Vec::new() }));
+        self.apply_set_prototype(&mut obj);
+        self.alloc_object(obj)
+    }
+
+    pub fn new_date(&mut self, ms: f64) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::Date(ms));
+        self.apply_date_prototype(&mut obj);
+        self.alloc_object(obj)
+    }
+
+    pub fn new_regexp(&mut self, pattern: String, flags: String) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::RegExp { pattern, flags });
+        self.apply_regexp_prototype(&mut obj);
+        self.alloc_object(obj)
+    }
+
+    pub fn date_ms(&self, val: JsValue) -> Option<f64> {
+        self.get_object(val).and_then(|obj| {
+            if let ObjectKind::Date(ms) = obj.kind() {
+                Some(*ms)
+            } else {
+                None
+            }
+        })
     }
 
     fn host_sentinel_idx(val: JsValue) -> Option<usize> {
@@ -1087,6 +1199,12 @@ impl Vm {
                         .take()
                         .unwrap_or(JsValue::undefined());
                     self.stack[base + dest as usize] = val;
+                }
+                Opcode::TypeOf => {
+                    let dest = instr.a();
+                    let val = self.stack[base + instr.b() as usize];
+                    let type_str = val.type_of();
+                    self.stack[base + dest as usize] = self.alloc_string(type_str.to_string());
                 }
                 _ => {}
             }

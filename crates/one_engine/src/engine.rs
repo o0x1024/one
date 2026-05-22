@@ -703,4 +703,134 @@ mod tests {
             .unwrap();
         assert!(result.is_string());
     }
+
+    #[test]
+    fn map_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("a", 1);
+                m.set("b", 2);
+                return m.get("a");
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn map_size() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("x", 10);
+                m.set("y", 20);
+                return m.size;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn map_has() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("key", "value");
+                return m.has("key");
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn map_delete() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("a", 1);
+                m.delete("a");
+                return m.has("a");
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn map_foreach() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("a", 10);
+                m.set("b", 20);
+                let sum = 0;
+                m.forEach(function(v, k) { sum = sum + v; });
+                return sum;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 30.0);
+    }
+
+    #[test]
+    fn set_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let s = new Set();
+                s.add(1);
+                s.add(2);
+                s.add(2);
+                return s.size;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn set_has() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let s = new Set();
+                s.add(42);
+                return s.has(42);
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn set_delete() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let s = new Set();
+                s.add(1);
+                s.add(2);
+                s.delete(1);
+                return s.size;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 1.0);
+    }
 }

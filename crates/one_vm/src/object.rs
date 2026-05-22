@@ -33,12 +33,26 @@ pub struct Property {
 }
 
 #[derive(Debug, Clone)]
+pub struct MapData {
+    pub entries: Vec<(JsValue, JsValue)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetData {
+    pub values: Vec<JsValue>,
+}
+
+#[derive(Debug, Clone)]
 pub enum ObjectKind {
     Ordinary,
     Array { length: u32 },
+    Map(MapData),
+    Set(SetData),
     Function(FunctionObject),
     HostObject { name: String },
     Promise(PromiseState),
+    Date(f64),
+    RegExp { pattern: String, flags: String },
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +88,28 @@ impl Trace for JsObject {
             && is_gc_object(proto as u64)
         {
             tracer.mark(proto as *const u8);
+        }
+        if let ObjectKind::Map(data) = &self.kind {
+            for (key, value) in &data.entries {
+                for val in [key, value] {
+                    if val.is_object()
+                        && let Some(raw) = val.as_object_raw()
+                        && is_gc_object(raw)
+                    {
+                        tracer.mark(raw as *const u8);
+                    }
+                }
+            }
+        }
+        if let ObjectKind::Set(data) = &self.kind {
+            for val in &data.values {
+                if val.is_object()
+                    && let Some(raw) = val.as_object_raw()
+                    && is_gc_object(raw)
+                {
+                    tracer.mark(raw as *const u8);
+                }
+            }
         }
         if let ObjectKind::Promise(state) = &self.kind {
             match state {
@@ -160,6 +196,14 @@ impl JsObject {
             && let ObjectKind::Array { length } = &self.kind
         {
             return Some(JsValue::from_i32(*length as i32));
+        }
+        if key == "size" {
+            if let ObjectKind::Map(data) = &self.kind {
+                return Some(JsValue::from_i32(data.entries.len() as i32));
+            }
+            if let ObjectKind::Set(data) = &self.kind {
+                return Some(JsValue::from_i32(data.values.len() as i32));
+            }
         }
         if let Some(prop) = self.properties.get(key) {
             return Some(prop.value);

@@ -185,6 +185,14 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok("catch".to_string())
             }
+            TokenKind::Delete => {
+                self.advance();
+                Ok("delete".to_string())
+            }
+            TokenKind::For => {
+                self.advance();
+                Ok("for".to_string())
+            }
             _ => Err(self.error("expected identifier")),
         }
     }
