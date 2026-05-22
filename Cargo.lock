@@ -5,6 +5,10 @@ version = 4
 [[package]]
 name = "one_cli"
 version = "0.1.0"
+dependencies = [
+ "one_core",
+ "one_engine",
+]
 
 [[package]]
 name = "one_compiler"
@@ -21,6 +25,13 @@ version = "0.1.0"
 [[package]]
 name = "one_engine"
 version = "0.1.0"
+dependencies = [
+ "one_compiler",
+ "one_core",
+ "one_parser",
+ "one_runtime",
+ "one_vm",
+]
 
 [[package]]
 name = "one_gc"
@@ -39,6 +50,10 @@ dependencies = [
 [[package]]
 name = "one_runtime"
 version = "0.1.0"
+dependencies = [
+ "one_core",
+ "one_vm",
+]
 
 [[package]]
 name = "one_vm"
