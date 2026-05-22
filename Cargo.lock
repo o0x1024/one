@@ -24,6 +24,9 @@ version = "0.1.0"
 [[package]]
 name = "one_gc"
 version = "0.1.0"
+dependencies = [
+ "one_core",
+]
 
 [[package]]
 name = "one_parser"
