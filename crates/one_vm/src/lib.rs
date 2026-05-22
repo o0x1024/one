@@ -152,4 +152,58 @@ mod tests {
         let result = run(r#"let a = {b: {c: 99}}; return a.b.c;"#);
         assert_eq!(result.as_i32(), Some(99));
     }
+
+    #[test]
+    fn call_js_function() {
+        let result = run("function add(a, b) { return a + b; } return add(3, 4);");
+        assert!(result.to_number() == 7.0);
+    }
+
+    #[test]
+    fn function_no_return() {
+        let result = run("function noop() {} return noop();");
+        assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn function_with_locals() {
+        let result = run("function f(x) { let y = x * 2; return y + 1; } return f(10);");
+        assert!(result.to_number() == 21.0);
+    }
+
+    #[test]
+    fn nested_function_calls() {
+        let result = run(
+            "function double(x) { return x * 2; } function quad(x) { return double(double(x)); } return quad(3);",
+        );
+        assert!(result.to_number() == 12.0);
+    }
+
+    #[test]
+    fn function_expression() {
+        let result = run("let add = function(a, b) { return a + b; }; return add(5, 6);");
+        assert!(result.to_number() == 11.0);
+    }
+
+    #[test]
+    fn arrow_function() {
+        let result = run("let sq = (x) => { return x * x; }; return sq(7);");
+        assert!(result.to_number() == 49.0);
+    }
+
+    #[test]
+    fn function_as_argument() {
+        let result = run(
+            "function apply(f, x) { return f(x); } function double(x) { return x * 2; } return apply(double, 5);",
+        );
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn recursive_function() {
+        let result = run(
+            "function fib(n) { if (n <= 1) { return n; } return fib(n - 1) + fib(n - 2); } return fib(10);",
+        );
+        assert!(result.to_number() == 55.0);
+    }
 }

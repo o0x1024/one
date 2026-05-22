@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use one_compiler::CodeBlock;
 use one_core::JsValue;
 use one_gc::Trace;
 
@@ -33,7 +34,7 @@ pub enum ObjectKind {
 #[derive(Debug, Clone)]
 pub struct FunctionObject {
     pub name: String,
-    pub code_index: usize,
+    pub code: CodeBlock,
     pub upvalues: Vec<JsValue>,
     pub param_count: u16,
 }

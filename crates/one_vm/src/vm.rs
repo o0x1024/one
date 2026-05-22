@@ -4,7 +4,7 @@ use one_compiler::{CodeBlock, Constant, Opcode};
 use one_core::{JsValue, OneError, OneResult};
 use one_gc::Heap;
 
-use crate::object::{JsObject, ObjectKind};
+use crate::object::{FunctionObject, JsObject, ObjectKind};
 
 const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
 
@@ -12,6 +12,7 @@ struct CallFrame {
     code: *const CodeBlock,
     pc: usize,
     base: usize,
+    dest: u8,
 }
 
 /// Native function callable from JS
@@ -121,6 +122,7 @@ impl Vm {
             code: code as *const CodeBlock,
             pc: 0,
             base,
+            dest: 0,
         });
 
         self.run()
@@ -369,6 +371,25 @@ impl Vm {
                         }
                     }
                 }
+                Opcode::CreateClosure => {
+                    let dest = instr.a();
+                    let func_idx = instr.bx() as usize;
+                    if func_idx >= code.inner_functions.len() {
+                        return Err(OneError::InternalError(format!(
+                            "CreateClosure: invalid function index {func_idx}"
+                        )));
+                    }
+                    let inner_code = code.inner_functions[func_idx].clone();
+                    let func_obj = FunctionObject {
+                        name: inner_code.name.clone(),
+                        code: inner_code,
+                        param_count: code.inner_functions[func_idx].param_count,
+                        upvalues: Vec::new(),
+                    };
+                    let obj = JsObject::with_kind(ObjectKind::Function(func_obj));
+                    let val = self.alloc_object(obj);
+                    self.stack[base + dest as usize] = val;
+                }
                 Opcode::Call => {
                     let dest = instr.a();
                     let func_reg = instr.b();
@@ -397,21 +418,59 @@ impl Vm {
                         continue;
                     }
 
+                    let js_call = self.get_object(func_val).and_then(|obj| {
+                        if let ObjectKind::Function(func_obj) = obj.kind() {
+                            Some((
+                                &func_obj.code as *const CodeBlock,
+                                func_obj.param_count,
+                                func_obj.code.register_count,
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some((code_ptr, param_count, register_count)) = js_call {
+                        let new_base = self.stack.len();
+                        self.stack.resize(
+                            new_base + register_count as usize,
+                            JsValue::undefined(),
+                        );
+
+                        for i in 0..argc.min(param_count as usize) {
+                            self.stack[new_base + i] =
+                                self.stack[base + func_reg as usize + 1 + i];
+                        }
+
+                        self.frames.push(CallFrame {
+                            code: code_ptr,
+                            pc: 0,
+                            base: new_base,
+                            dest,
+                        });
+                        continue;
+                    }
+
                     self.stack[base + dest as usize] = JsValue::undefined();
                 }
                 Opcode::Return => {
                     let val = self.stack[base + instr.a() as usize];
-                    self.frames.pop();
-                    self.stack.truncate(base);
+                    let frame = self.frames.pop().unwrap();
+                    self.stack.truncate(frame.base);
                     if self.frames.is_empty() {
                         return Ok(val);
                     }
-                    return Ok(val);
+                    let caller_base = self.frames.last().unwrap().base;
+                    self.stack[caller_base + frame.dest as usize] = val;
                 }
                 Opcode::ReturnUndef => {
-                    self.frames.pop();
-                    self.stack.truncate(base);
-                    return Ok(JsValue::undefined());
+                    let frame = self.frames.pop().unwrap();
+                    self.stack.truncate(frame.base);
+                    if self.frames.is_empty() {
+                        return Ok(JsValue::undefined());
+                    }
+                    let caller_base = self.frames.last().unwrap().base;
+                    self.stack[caller_base + frame.dest as usize] = JsValue::undefined();
                 }
                 _ => {}
             }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use one_parser::ast::*;
 
 use crate::codeblock::{CodeBlock, Constant};
@@ -6,6 +8,7 @@ use crate::opcode::{Instruction, Opcode};
 pub struct Compiler {
     code: CodeBlock,
     next_register: u8,
+    locals: HashMap<String, u8>,
 }
 
 impl Compiler {
@@ -13,6 +16,7 @@ impl Compiler {
         Compiler {
             code: CodeBlock::new(name),
             next_register: 0,
+            locals: HashMap::new(),
         }
     }
 
@@ -263,6 +267,18 @@ impl Compiler {
 
     fn compile_variable_declarator(&mut self, declarator: &VariableDeclarator) {
         if let Some(init) = &declarator.init {
+            if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
+                let reg = if let Some(&existing) = self.locals.get(name) {
+                    existing
+                } else {
+                    let r = self.alloc_reg();
+                    self.locals.insert(name.clone(), r);
+                    r
+                };
+                self.compile_expression_to(init, reg);
+                return;
+            }
+
             let value_reg = self.compile_expression(init);
             if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
                 let name_idx = self.add_string(name);
@@ -279,6 +295,13 @@ impl Compiler {
         inner.code.param_count = func.params.len() as u16;
         inner.code.is_async = func.is_async;
         inner.code.is_generator = func.is_generator;
+
+        for (i, param) in func.params.iter().enumerate() {
+            if let PatternKind::Identifier { name, .. } = &param.kind {
+                inner.locals.insert(name.clone(), i as u8);
+            }
+            inner.alloc_reg();
+        }
 
         match &func.body {
             FunctionBody::Block(stmts) => {
@@ -339,9 +362,13 @@ impl Compiler {
                 self.code.emit(Instruction::abx(Opcode::LoadNull, dest, 0));
             }
             ExpressionKind::Identifier(name) => {
-                let idx = self.add_string(name);
-                self.code
-                    .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+                if let Some(&reg) = self.locals.get(name) {
+                    self.code.emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+                } else {
+                    let idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+                }
             }
             ExpressionKind::This => {
                 let idx = self.add_string("this");
@@ -631,12 +658,23 @@ impl Compiler {
         let value_reg = self.compile_expression(right);
         match left {
             AssignTarget::Identifier(name) => {
-                let name_idx = self.add_string(name);
-                self.code
-                    .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
-                if dest != value_reg {
+                if let Some(&reg) = self.locals.get(name) {
+                    if reg != value_reg {
+                        self.code
+                            .emit(Instruction::abc(Opcode::Move, reg, value_reg, 0));
+                    }
+                    if dest != reg {
+                        self.code
+                            .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                    }
+                } else {
+                    let name_idx = self.add_string(name);
                     self.code
-                        .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                        .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+                    if dest != value_reg {
+                        self.code
+                            .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                    }
                 }
             }
             AssignTarget::Member(member) => {

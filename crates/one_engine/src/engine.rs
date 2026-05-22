@@ -114,4 +114,11 @@ mod tests {
         let engine = Engine::default();
         assert!(engine.vm().get_global("console").is_object());
     }
+
+    #[test]
+    fn console_log_still_works_with_functions() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"function greet(name) { console.log("Hello " + name); } greet("World");"#);
+        assert!(result.is_ok());
+    }
 }
