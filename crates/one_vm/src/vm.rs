@@ -4,6 +4,8 @@ use one_compiler::{CodeBlock, Constant, Opcode};
 use one_core::{JsValue, OneError, OneResult};
 use one_gc::Heap;
 
+use crate::object::{JsObject, ObjectKind};
+
 const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
 
 struct CallFrame {
@@ -19,10 +21,9 @@ pub struct Vm {
     stack: Vec<JsValue>,
     frames: Vec<CallFrame>,
     globals: HashMap<String, JsValue>,
-    #[allow(dead_code)]
     heap: Heap,
     string_table: Vec<String>,
-    host_functions: HashMap<String, HostFunction>,
+    host_functions: Vec<(String, HostFunction)>,
 }
 
 impl Vm {
@@ -33,7 +34,7 @@ impl Vm {
             globals: HashMap::new(),
             heap: Heap::new(),
             string_table: Vec::new(),
-            host_functions: HashMap::new(),
+            host_functions: Vec::new(),
         }
     }
 
@@ -43,28 +44,29 @@ impl Vm {
         F: Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue> + 'static,
     {
         let name = name.to_string();
-        self.host_functions.insert(name.clone(), Box::new(func));
 
-        if let Some((parent, _)) = name.rsplit_once('.') {
-            self.ensure_host_namespace(parent);
+        let fn_idx = self.host_functions.len();
+        self.host_functions
+            .push((name.clone(), Box::new(func)));
+        let sentinel = JsValue::from_object_raw(HOST_SENTINEL_MASK | fn_idx as u64);
+
+        if let Some((parent_name, method_name)) = name.rsplit_once('.') {
+            let parent_val = self.globals.get(parent_name).copied();
+            if let Some(parent_val) = parent_val {
+                if let Some(obj) = self.get_object_mut(parent_val) {
+                    obj.set_property(method_name.to_string(), sentinel);
+                }
+            } else {
+                let mut ns_obj = JsObject::with_kind(ObjectKind::HostObject {
+                    name: parent_name.to_string(),
+                });
+                ns_obj.set_property(method_name.to_string(), sentinel);
+                let ns_val = self.alloc_object(ns_obj);
+                self.globals.insert(parent_name.to_string(), ns_val);
+            }
+        } else {
+            self.globals.insert(name, sentinel);
         }
-
-        let idx = self.string_table.len();
-        self.string_table.push(name.clone());
-        self.globals
-            .insert(name, JsValue::from_object_raw(HOST_SENTINEL_MASK | idx as u64));
-    }
-
-    fn ensure_host_namespace(&mut self, name: &str) {
-        if self.globals.contains_key(name) {
-            return;
-        }
-        let idx = self.string_table.len();
-        self.string_table.push(name.to_string());
-        self.globals.insert(
-            name.to_string(),
-            JsValue::from_object_raw(HOST_SENTINEL_MASK | idx as u64),
-        );
     }
 
     fn host_sentinel_idx(val: JsValue) -> Option<usize> {
@@ -75,6 +77,38 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// Allocate a JsObject on the heap and return a JsValue pointing to it
+    pub fn alloc_object(&mut self, obj: JsObject) -> JsValue {
+        let ptr = self.heap.alloc(obj);
+        JsValue::from_object_raw(ptr as u64)
+    }
+
+    /// Get a reference to a JsObject from a JsValue
+    pub fn get_object(&self, val: JsValue) -> Option<&JsObject> {
+        if val.is_object() {
+            let raw = val.as_object_raw()?;
+            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK {
+                return None;
+            }
+            Some(unsafe { &*(raw as *const JsObject) })
+        } else {
+            None
+        }
+    }
+
+    /// Get a mutable reference to a JsObject from a JsValue
+    pub fn get_object_mut(&mut self, val: JsValue) -> Option<&mut JsObject> {
+        if val.is_object() {
+            let raw = val.as_object_raw()?;
+            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK {
+                return None;
+            }
+            Some(unsafe { &mut *(raw as *mut JsObject) })
+        } else {
+            None
+        }
     }
 
     /// Execute a CodeBlock
@@ -257,7 +291,7 @@ impl Vm {
                 }
                 Opcode::GetProp => {
                     let dest = instr.a();
-                    let obj = self.stack[base + instr.b() as usize];
+                    let obj_val = self.stack[base + instr.b() as usize];
                     let name_idx = instr.c() as usize;
                     let name = match &code.constants[name_idx] {
                         Constant::String(s) => s.clone(),
@@ -267,24 +301,72 @@ impl Vm {
                             ));
                         }
                     };
-                    let key = if let Some(obj_name) = self.find_global_name(obj) {
-                        format!("{obj_name}.{name}")
-                    } else {
-                        name.clone()
-                    };
-                    if self.host_functions.contains_key(&key) {
-                        let idx = self
-                            .string_table
-                            .iter()
-                            .position(|s| s == &key)
-                            .unwrap_or_else(|| {
-                                self.string_table.push(key.clone());
-                                self.string_table.len() - 1
-                            });
-                        self.stack[base + dest as usize] =
-                            JsValue::from_object_raw(HOST_SENTINEL_MASK | idx as u64);
+
+                    if let Some(obj) = self.get_object(obj_val) {
+                        let value = obj.get_property(&name).unwrap_or(JsValue::undefined());
+                        self.stack[base + dest as usize] = value;
                     } else {
                         self.stack[base + dest as usize] = JsValue::undefined();
+                    }
+                }
+                Opcode::SetProp => {
+                    let obj_val = self.stack[base + instr.a() as usize];
+                    let name_idx = instr.b() as usize;
+                    let value = self.stack[base + instr.c() as usize];
+                    let name = match &code.constants[name_idx] {
+                        Constant::String(s) => s.clone(),
+                        _ => {
+                            return Err(OneError::InternalError(
+                                "SetProp: expected string constant".into(),
+                            ));
+                        }
+                    };
+                    if let Some(obj) = self.get_object_mut(obj_val) {
+                        obj.set_property(name, value);
+                    }
+                }
+                Opcode::CreateObject => {
+                    let dest = instr.a();
+                    let obj = JsObject::new();
+                    let val = self.alloc_object(obj);
+                    self.stack[base + dest as usize] = val;
+                }
+                Opcode::InitProp => {
+                    let obj_val = self.stack[base + instr.a() as usize];
+                    let name_idx = instr.b() as usize;
+                    let value = self.stack[base + instr.c() as usize];
+                    let name = match &code.constants[name_idx] {
+                        Constant::String(s) => s.clone(),
+                        _ => {
+                            return Err(OneError::InternalError(
+                                "InitProp: expected string constant".into(),
+                            ));
+                        }
+                    };
+                    if let Some(obj) = self.get_object_mut(obj_val) {
+                        obj.set_property(name, value);
+                    }
+                }
+                Opcode::CreateArray => {
+                    let dest = instr.a();
+                    let len = instr.b();
+                    let obj = JsObject::with_kind(ObjectKind::Array {
+                        length: len as u32,
+                    });
+                    let val = self.alloc_object(obj);
+                    self.stack[base + dest as usize] = val;
+                }
+                Opcode::SetArrayElem => {
+                    let obj_val = self.stack[base + instr.a() as usize];
+                    let index = instr.b();
+                    let value = self.stack[base + instr.c() as usize];
+                    if let Some(obj) = self.get_object_mut(obj_val) {
+                        obj.set_property(index.to_string(), value);
+                        if let ObjectKind::Array { length } = obj.kind_mut()
+                            && index as u32 >= *length
+                        {
+                            *length = index as u32 + 1;
+                        }
                     }
                 }
                 Opcode::Call => {
@@ -294,17 +376,22 @@ impl Vm {
                     let func_val = self.stack[base + func_reg as usize];
 
                     if let Some(idx) = Self::host_sentinel_idx(func_val) {
-                        let name = self.string_table[idx].clone();
+                        if idx >= self.host_functions.len() {
+                            return Err(OneError::InternalError(format!(
+                                "unknown host fn index: {idx}"
+                            )));
+                        }
+
                         let args: Vec<JsValue> = (0..argc)
                             .map(|i| self.stack[base + func_reg as usize + 1 + i])
                             .collect();
 
-                        let host_fn = self
-                            .host_functions
-                            .remove(&name)
-                            .ok_or_else(|| OneError::InternalError(format!("unknown host fn: {name}")))?;
+                        let placeholder: HostFunction =
+                            Box::new(|_, _| Ok(JsValue::undefined()));
+                        let host_fn =
+                            std::mem::replace(&mut self.host_functions[idx].1, placeholder);
                         let result = host_fn(self, &args)?;
-                        self.host_functions.insert(name, host_fn);
+                        self.host_functions[idx].1 = host_fn;
 
                         self.stack[base + dest as usize] = result;
                         continue;
@@ -377,15 +464,6 @@ impl Vm {
             return !s.is_empty();
         }
         true
-    }
-
-    fn find_global_name(&self, val: JsValue) -> Option<String> {
-        for (name, &gval) in &self.globals {
-            if gval == val {
-                return Some(name.clone());
-            }
-        }
-        None
     }
 
     pub fn get_global(&self, name: &str) -> JsValue {

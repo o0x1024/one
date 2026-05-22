@@ -1,5 +1,7 @@
+pub mod object;
 pub mod vm;
 
+pub use object::{FunctionObject, JsObject, ObjectKind, Property};
 pub use vm::Vm;
 
 #[cfg(test)]
@@ -125,5 +127,29 @@ mod tests {
     fn vm_default_returns_undefined() {
         let result = run("42;");
         assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn object_literal() {
+        let result = run(r#"let obj = {x: 1, y: 2}; return obj.x;"#);
+        assert_eq!(result.as_i32(), Some(1));
+    }
+
+    #[test]
+    fn object_property_set() {
+        let result = run(r#"let obj = {}; obj.x = 42; return obj.x;"#);
+        assert_eq!(result.as_i32(), Some(42));
+    }
+
+    #[test]
+    fn array_literal() {
+        let result = run(r#"let arr = [10, 20, 30]; return arr;"#);
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn nested_property_access() {
+        let result = run(r#"let a = {b: {c: 99}}; return a.b.c;"#);
+        assert_eq!(result.as_i32(), Some(99));
     }
 }
