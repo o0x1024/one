@@ -3,6 +3,14 @@ name = "one_engine"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = ["full-builtins", "typescript", "modules"]
+full-builtins = []
+typescript = []
+modules = []
+timers = []
+regexp = ["one_runtime/regexp"]
+
 [dependencies]
 one_core.workspace = true
 one_parser.workspace = true

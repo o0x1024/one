@@ -3,6 +3,10 @@ name = "one_runtime"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+regexp = []
+
 [dependencies]
 one_core.workspace = true
 one_compiler.workspace = true

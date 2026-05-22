@@ -5,24 +5,43 @@ use one_core::{CompileError, JsValue, OneError, OneResult};
 use one_parser::parser::Parser;
 use one_vm::Vm;
 
-pub struct Engine {
+pub struct Engine<T: 'static = ()> {
     vm: Vm,
+    store: T,
     registered_modules: HashMap<String, String>,
     module_cache: HashMap<String, HashMap<String, JsValue>>,
     baseline_globals: HashMap<String, JsValue>,
 }
 
-impl Engine {
+impl Engine<()> {
     pub fn new() -> Self {
-        let mut vm = Vm::new();
-        one_runtime::install_builtins(&mut vm);
-        let baseline_globals = vm.snapshot_globals();
-        Engine {
+        crate::builder::EngineBuilder::new().build()
+    }
+}
+
+impl<T: 'static> Engine<T> {
+    pub(crate) fn from_parts(
+        vm: Vm,
+        store: T,
+        registered_modules: HashMap<String, String>,
+        module_cache: HashMap<String, HashMap<String, JsValue>>,
+        baseline_globals: HashMap<String, JsValue>,
+    ) -> Self {
+        Self {
             vm,
-            registered_modules: HashMap::new(),
-            module_cache: HashMap::new(),
+            store,
+            registered_modules,
+            module_cache,
             baseline_globals,
         }
+    }
+
+    pub fn store(&self) -> &T {
+        &self.store
+    }
+
+    pub fn store_mut(&mut self) -> &mut T {
+        &mut self.store
     }
 
     /// Register a virtual module by specifier name.
@@ -195,7 +214,7 @@ impl Engine {
     }
 }
 
-impl Default for Engine {
+impl Default for Engine<()> {
     fn default() -> Self {
         Self::new()
     }

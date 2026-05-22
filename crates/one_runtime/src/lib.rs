@@ -9,11 +9,14 @@ pub mod json;
 pub mod math;
 pub mod number;
 pub mod object;
+pub mod preset;
 pub mod promise;
 pub mod regexp;
 pub mod string;
 pub mod symbol;
 pub mod timers;
+
+pub use preset::{BuiltinModule, Preset, install_preset};
 
 use one_vm::Vm;
 
