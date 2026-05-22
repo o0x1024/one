@@ -1,3 +1,4 @@
+pub mod array;
 pub mod console;
 pub mod globals;
 pub mod object;
@@ -11,4 +12,5 @@ pub fn install_builtins(vm: &mut Vm) {
     promise::install_promise(vm);
     globals::install_globals(vm);
     object::install_object(vm);
+    array::install_array(vm);
 }

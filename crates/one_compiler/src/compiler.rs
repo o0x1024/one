@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use one_parser::ast::*;
 
@@ -9,6 +9,7 @@ pub struct Compiler {
     code: CodeBlock,
     next_register: u8,
     locals: HashMap<String, u8>,
+    mirrored_globals: HashSet<String>,
     is_top_level: bool,
 }
 
@@ -18,6 +19,7 @@ impl Compiler {
             code: CodeBlock::new(name),
             next_register: 0,
             locals: HashMap::new(),
+            mirrored_globals: HashSet::new(),
             is_top_level: true,
         }
     }
@@ -393,6 +395,7 @@ impl Compiler {
                     let name_idx = self.add_string(name);
                     self.code
                         .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+                    self.mirrored_globals.insert(name.clone());
                 }
             }
             PatternKind::ArrayPattern { elements, .. } => {
@@ -450,9 +453,27 @@ impl Compiler {
                 if let Some(&local_reg) = self.locals.get(name) {
                     self.code
                         .emit(Instruction::abc(Opcode::Move, local_reg, value_reg, 0));
+                    if self.is_top_level {
+                        let name_idx = self.add_string(name);
+                        self.code.emit(Instruction::abx(
+                            Opcode::SetGlobal,
+                            value_reg,
+                            name_idx,
+                        ));
+                        self.mirrored_globals.insert(name.clone());
+                    }
                     false
                 } else {
                     self.locals.insert(name.clone(), value_reg);
+                    if self.is_top_level {
+                        let name_idx = self.add_string(name);
+                        self.code.emit(Instruction::abx(
+                            Opcode::SetGlobal,
+                            value_reg,
+                            name_idx,
+                        ));
+                        self.mirrored_globals.insert(name.clone());
+                    }
                     true
                 }
             }
@@ -689,7 +710,11 @@ impl Compiler {
                 self.code.emit(Instruction::abx(Opcode::LoadNull, dest, 0));
             }
             ExpressionKind::Identifier(name) => {
-                if let Some(&reg) = self.locals.get(name) {
+                if self.is_top_level && self.mirrored_globals.contains(name) {
+                    let idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+                } else if let Some(&reg) = self.locals.get(name) {
                     self.code.emit(Instruction::abc(Opcode::Move, dest, reg, 0));
                 } else {
                     let idx = self.add_string(name);
@@ -1043,6 +1068,12 @@ impl Compiler {
                     if reg != value_reg {
                         self.code
                             .emit(Instruction::abc(Opcode::Move, reg, value_reg, 0));
+                    }
+                    if self.is_top_level {
+                        let name_idx = self.add_string(name);
+                        self.code
+                            .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+                        self.mirrored_globals.insert(name.clone());
                     }
                     if dest != reg {
                         self.code

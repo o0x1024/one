@@ -295,4 +295,161 @@ mod tests {
         );
         assert!(result.to_number() == 99.0);
     }
+
+    #[test]
+    fn array_push() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [1, 2]; arr.push(3); return arr.length;")
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn array_pop() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [1, 2, 3]; let x = arr.pop(); return x;")
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn array_map() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let arr = [1, 2, 3];
+                let doubled = arr.map(function(x) { return x * 2; });
+                return doubled[0] + doubled[1] + doubled[2];
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 12.0);
+    }
+
+    #[test]
+    fn array_filter() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let arr = [1, 2, 3, 4, 5];
+                let evens = arr.filter(function(x) { return x % 2 === 0; });
+                return evens.length;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn array_reduce() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let arr = [1, 2, 3, 4, 5];
+                let sum = arr.reduce(function(acc, x) { return acc + x; }, 0);
+                return sum;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 15.0);
+    }
+
+    #[test]
+    fn array_foreach() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let sum = 0;
+                let arr = [10, 20, 30];
+                arr.forEach(function(x) { sum = sum + x; });
+                return sum;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 60.0);
+    }
+
+    #[test]
+    fn array_indexof() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [10, 20, 30]; return arr.indexOf(20);")
+            .unwrap();
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn array_join() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let arr = [1, 2, 3]; return arr.join("-");"#)
+            .unwrap();
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn array_includes() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [1, 2, 3]; return arr.includes(2);")
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn array_is_array() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("return Array.isArray([1, 2, 3]);")
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn array_slice() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [1, 2, 3, 4, 5]; let s = arr.slice(1, 3); return s.length;")
+            .unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn array_concat() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let a = [1, 2]; let b = [3, 4]; let c = a.concat(b); return c.length;")
+            .unwrap();
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn array_find() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let arr = [1, 2, 3, 4, 5];
+                let found = arr.find(function(x) { return x > 3; });
+                return found;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn array_reverse() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let arr = [1, 2, 3]; arr.reverse(); return arr[0];")
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
 }

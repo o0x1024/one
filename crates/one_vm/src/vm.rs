@@ -56,6 +56,7 @@ pub struct Vm {
     microtasks: Vec<MicroTask>,
     promise_methods: Vec<(JsValue, PromiseMethodKind)>,
     promise_resolvers: Vec<(JsValue, PromiseResolverKind)>,
+    array_prototype: Option<JsValue>,
 }
 
 impl Vm {
@@ -72,6 +73,7 @@ impl Vm {
             microtasks: Vec::new(),
             promise_methods: Vec::new(),
             promise_resolvers: Vec::new(),
+            array_prototype: None,
         }
     }
 
@@ -80,12 +82,7 @@ impl Vm {
     where
         F: Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue> + 'static,
     {
-        let name = name.to_string();
-
-        let fn_idx = self.host_functions.len();
-        self.host_functions
-            .push((name.clone(), Box::new(func)));
-        let sentinel = JsValue::from_object_raw(HOST_SENTINEL_MASK | fn_idx as u64);
+        let sentinel = self.register_host_fn_returning_sentinel(name, func);
 
         if let Some((parent_name, method_name)) = name.rsplit_once('.') {
             let parent_val = self.globals.get(parent_name).copied();
@@ -102,8 +99,36 @@ impl Vm {
                 self.globals.insert(parent_name.to_string(), ns_val);
             }
         } else {
-            self.globals.insert(name, sentinel);
+            self.globals.insert(name.to_string(), sentinel);
         }
+    }
+
+    pub fn register_host_fn_returning_sentinel<F>(&mut self, name: &str, func: F) -> JsValue
+    where
+        F: Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue> + 'static,
+    {
+        let fn_idx = self.host_functions.len();
+        self.host_functions
+            .push((name.to_string(), Box::new(func)));
+        JsValue::from_object_raw(HOST_SENTINEL_MASK | fn_idx as u64)
+    }
+
+    pub fn set_array_prototype(&mut self, proto: JsValue) {
+        self.array_prototype = Some(proto);
+    }
+
+    fn apply_array_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.array_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    pub fn new_array(&mut self, length: u32) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::Array { length });
+        self.apply_array_prototype(&mut obj);
+        self.alloc_object(obj)
     }
 
     fn host_sentinel_idx(val: JsValue) -> Option<usize> {
@@ -420,6 +445,9 @@ impl Vm {
         for (promise_val, _) in &self.promise_resolvers {
             Self::push_object_root(roots, *promise_val);
         }
+        if let Some(proto) = self.array_prototype {
+            Self::push_object_root(roots, proto);
+        }
     }
 
     fn push_object_root(roots: &mut Vec<*const u8>, val: JsValue) {
@@ -601,7 +629,12 @@ impl Vm {
                 Opcode::StrictEq => {
                     let b = self.stack[base + instr.b() as usize];
                     let c = self.stack[base + instr.c() as usize];
-                    self.stack[base + instr.a() as usize] = JsValue::from_bool(b == c);
+                    let equal = if b.is_number() && c.is_number() {
+                        b.to_number() == c.to_number()
+                    } else {
+                        b == c
+                    };
+                    self.stack[base + instr.a() as usize] = JsValue::from_bool(equal);
                 }
                 Opcode::Not => {
                     let b = self.stack[base + instr.b() as usize];
@@ -785,10 +818,7 @@ impl Vm {
                 Opcode::CreateArray => {
                     let dest = instr.a();
                     let len = instr.b();
-                    let obj = JsObject::with_kind(ObjectKind::Array {
-                        length: len as u32,
-                    });
-                    let val = self.alloc_object(obj);
+                    let val = self.new_array(len as u32);
                     self.stack[base + dest as usize] = val;
                 }
                 Opcode::SetArrayElem => {
