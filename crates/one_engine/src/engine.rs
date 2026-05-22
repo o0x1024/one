@@ -219,6 +219,66 @@ mod tests {
     }
 
     #[test]
+    fn object_keys() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let obj = {a: 1, b: 2, c: 3}; return Object.keys(obj).length;")
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn object_values() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let obj = {x: 10, y: 20}; let vals = Object.values(obj); return vals[0] + vals[1];")
+            .unwrap();
+        assert!(result.to_number() == 30.0);
+    }
+
+    #[test]
+    fn object_assign() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let a = {x: 1}; let b = {y: 2}; Object.assign(a, b); return a.y;")
+            .unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn object_create() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let proto = {greet: function() { return 42; }};
+                let obj = Object.create(proto);
+                return obj.greet();
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn object_freeze() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let obj = {x: 10}; Object.freeze(obj); obj.x = 99; return obj.x;")
+            .unwrap();
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn object_has_own() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let obj = {a: 1}; return Object.hasOwn(obj, 'a');")
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
     fn gc_survives_collection() {
         let result = run_with_gc_threshold(
             r#"

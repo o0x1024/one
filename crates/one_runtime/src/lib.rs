@@ -1,5 +1,6 @@
 pub mod console;
 pub mod globals;
+pub mod object;
 pub mod promise;
 
 use one_vm::Vm;
@@ -9,4 +10,5 @@ pub fn install_builtins(vm: &mut Vm) {
     console::install_console(vm);
     promise::install_promise(vm);
     globals::install_globals(vm);
+    object::install_object(vm);
 }

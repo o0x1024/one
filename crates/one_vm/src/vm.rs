@@ -1055,7 +1055,7 @@ impl Vm {
         }
     }
 
-    fn alloc_string(&mut self, s: String) -> JsValue {
+    pub fn alloc_string(&mut self, s: String) -> JsValue {
         let idx = self.string_table.len();
         self.string_table.push(s);
         JsValue::from_string_raw(idx as u64)

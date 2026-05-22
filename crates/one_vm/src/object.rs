@@ -227,4 +227,31 @@ impl JsObject {
             .map(|(k, _)| k.clone())
             .collect()
     }
+
+    pub fn properties(&self) -> &HashMap<String, Property> {
+        &self.properties
+    }
+
+    pub fn freeze(&mut self) {
+        for prop in self.properties.values_mut() {
+            prop.writable = false;
+            prop.configurable = false;
+        }
+    }
+
+    pub fn own_property_values(&self) -> Vec<JsValue> {
+        self.properties
+            .iter()
+            .filter(|(_, p)| p.enumerable)
+            .map(|(_, p)| p.value)
+            .collect()
+    }
+
+    pub fn own_entries(&self) -> Vec<(String, JsValue)> {
+        self.properties
+            .iter()
+            .filter(|(_, p)| p.enumerable)
+            .map(|(k, p)| (k.clone(), p.value))
+            .collect()
+    }
 }
