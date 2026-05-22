@@ -13,6 +13,8 @@ struct CallFrame {
     pc: usize,
     base: usize,
     dest: u8,
+    is_constructor: bool,
+    this_val: JsValue,
 }
 
 /// Native function callable from JS
@@ -123,6 +125,8 @@ impl Vm {
             pc: 0,
             base,
             dest: 0,
+            is_constructor: false,
+            this_val: JsValue::undefined(),
         });
 
         self.run()
@@ -386,8 +390,11 @@ impl Vm {
                         param_count: code.inner_functions[func_idx].param_count,
                         upvalues: Vec::new(),
                     };
-                    let obj = JsObject::with_kind(ObjectKind::Function(func_obj));
-                    let val = self.alloc_object(obj);
+                    let mut func = JsObject::with_kind(ObjectKind::Function(func_obj));
+                    let proto = JsObject::new();
+                    let proto_val = self.alloc_object(proto);
+                    func.set_property("prototype".to_string(), proto_val);
+                    let val = self.alloc_object(func);
                     self.stack[base + dest as usize] = val;
                 }
                 Opcode::Call => {
@@ -447,30 +454,93 @@ impl Vm {
                             pc: 0,
                             base: new_base,
                             dest,
+                            is_constructor: false,
+                            this_val: JsValue::undefined(),
                         });
                         continue;
                     }
 
                     self.stack[base + dest as usize] = JsValue::undefined();
                 }
+                Opcode::New => {
+                    let dest = instr.a();
+                    let ctor_reg = instr.b();
+                    let argc = instr.c() as usize;
+                    let ctor_val = self.stack[base + ctor_reg as usize];
+
+                    let js_new = self.get_object(ctor_val).and_then(|obj| {
+                        if let ObjectKind::Function(func_obj) = obj.kind() {
+                            let param_count = func_obj.param_count;
+                            let register_count = func_obj.code.register_count;
+                            let code_ptr = &func_obj.code as *const CodeBlock;
+                            let proto_raw = obj
+                                .get_property("prototype")
+                                .and_then(|v| v.as_object_raw());
+                            Some((code_ptr, param_count, register_count, proto_raw))
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some((code_ptr, param_count, register_count, proto_raw)) = js_new {
+                        let mut instance = JsObject::new();
+                        if let Some(raw) = proto_raw {
+                            instance.set_prototype(Some(raw as *mut JsObject));
+                        }
+                        let instance_val = self.alloc_object(instance);
+                        self.globals.insert("this".to_string(), instance_val);
+
+                        let new_base = self.stack.len();
+                        self.stack.resize(
+                            new_base + register_count as usize,
+                            JsValue::undefined(),
+                        );
+
+                        for i in 0..argc.min(param_count as usize) {
+                            self.stack[new_base + i] =
+                                self.stack[base + ctor_reg as usize + 1 + i];
+                        }
+
+                        self.frames.push(CallFrame {
+                            code: code_ptr,
+                            pc: 0,
+                            base: new_base,
+                            dest,
+                            is_constructor: true,
+                            this_val: instance_val,
+                        });
+                        continue;
+                    }
+                    self.stack[base + dest as usize] = JsValue::undefined();
+                }
                 Opcode::Return => {
                     let val = self.stack[base + instr.a() as usize];
                     let frame = self.frames.pop().unwrap();
                     self.stack.truncate(frame.base);
+                    let return_val = if frame.is_constructor && !val.is_object() {
+                        frame.this_val
+                    } else {
+                        val
+                    };
                     if self.frames.is_empty() {
-                        return Ok(val);
+                        return Ok(return_val);
                     }
                     let caller_base = self.frames.last().unwrap().base;
-                    self.stack[caller_base + frame.dest as usize] = val;
+                    self.stack[caller_base + frame.dest as usize] = return_val;
                 }
                 Opcode::ReturnUndef => {
                     let frame = self.frames.pop().unwrap();
                     self.stack.truncate(frame.base);
+                    let return_val = if frame.is_constructor {
+                        frame.this_val
+                    } else {
+                        JsValue::undefined()
+                    };
                     if self.frames.is_empty() {
-                        return Ok(JsValue::undefined());
+                        return Ok(return_val);
                     }
                     let caller_base = self.frames.last().unwrap().base;
-                    self.stack[caller_base + frame.dest as usize] = JsValue::undefined();
+                    self.stack[caller_base + frame.dest as usize] = return_val;
                 }
                 _ => {}
             }

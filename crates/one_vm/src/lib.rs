@@ -206,4 +206,59 @@ mod tests {
         );
         assert!(result.to_number() == 55.0);
     }
+
+    #[test]
+    fn new_operator() {
+        let result = run("function Point(x, y) { this.x = x; this.y = y; } let p = new Point(3, 4); return p.x;");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn new_operator_y() {
+        let result = run("function Point(x, y) { this.x = x; this.y = y; } let p = new Point(3, 4); return p.y;");
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn prototype_method() {
+        let result = run(r#"
+            function Point(x, y) { this.x = x; this.y = y; }
+            Point.prototype = {};
+            Point.prototype.sum = function() { return this.x + this.y; };
+            let p = new Point(3, 4);
+            return p.sum();
+        "#);
+        assert!(result.to_number() == 7.0);
+    }
+
+    #[test]
+    fn class_basic() {
+        let result = run(r#"
+            class Point {
+                constructor(x, y) { this.x = x; this.y = y; }
+            }
+            let p = new Point(10, 20);
+            return p.x;
+        "#);
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn class_with_method() {
+        let result = run(r#"
+            class Calc {
+                constructor(v) { this.v = v; }
+                double() { return this.v * 2; }
+            }
+            let c = new Calc(21);
+            return c.double();
+        "#);
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn constructor_returns_undefined_gives_this() {
+        let result = run("function Foo() { this.x = 99; } let f = new Foo(); return f.x;");
+        assert!(result.to_number() == 99.0);
+    }
 }

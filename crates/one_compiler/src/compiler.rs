@@ -256,7 +256,13 @@ impl Compiler {
                 self.free_reg();
             }
             DeclarationKind::ClassDeclaration(class) => {
-                let _ = class;
+                let ctor_reg = self.compile_class(class);
+                if let Some(name) = &class.id {
+                    let name_idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::SetGlobal, ctor_reg, name_idx));
+                }
+                self.free_reg();
             }
             DeclarationKind::ImportDeclaration { .. }
             | DeclarationKind::ExportNamedDeclaration { .. }
@@ -322,6 +328,76 @@ impl Compiler {
         let idx = self.code.inner_functions.len();
         self.code.inner_functions.push(inner.code);
         idx as u16
+    }
+
+    fn compile_class(&mut self, class: &Class) -> u8 {
+        let mut constructor: Option<Function> = None;
+        let mut methods: Vec<(String, Function)> = Vec::new();
+
+        for member in &class.body {
+            if let ClassMemberKind::Method {
+                key,
+                value,
+                is_static,
+                computed,
+                ..
+            } = &member.kind
+            {
+                if *is_static || *computed {
+                    continue;
+                }
+                let name = property_key_name(key);
+                if name == "constructor" {
+                    constructor = Some(value.clone());
+                } else {
+                    methods.push((name, value.clone()));
+                }
+            }
+        }
+
+        let mut constructor = constructor.unwrap_or_else(|| Function {
+            id: class.id.clone(),
+            params: vec![],
+            body: FunctionBody::Block(vec![]),
+            is_async: false,
+            is_generator: false,
+            span: class.span,
+        });
+        if constructor.id.is_none() {
+            constructor.id = class.id.clone();
+        }
+
+        let ctor_idx = self.compile_function(&constructor);
+        let ctor_reg = self.alloc_reg();
+        self.code
+            .emit(Instruction::abx(Opcode::CreateClosure, ctor_reg, ctor_idx));
+
+        let proto_reg = self.alloc_reg();
+        let prototype_idx = self.add_string("prototype");
+        self.code.emit(Instruction::abc(
+            Opcode::GetProp,
+            proto_reg,
+            ctor_reg,
+            prototype_idx as u8,
+        ));
+
+        for (name, method) in methods {
+            let method_idx = self.compile_function(&method);
+            let method_reg = self.alloc_reg();
+            self.code
+                .emit(Instruction::abx(Opcode::CreateClosure, method_reg, method_idx));
+            let name_idx = self.add_string(&name);
+            self.code.emit(Instruction::abc(
+                Opcode::InitProp,
+                proto_reg,
+                name_idx as u8,
+                method_reg,
+            ));
+            self.free_reg();
+        }
+
+        self.free_reg();
+        ctor_reg
     }
 
     fn compile_expression(&mut self, expr: &Expression) -> u8 {
@@ -512,19 +588,69 @@ impl Compiler {
                 arguments,
                 ..
             } => {
-                let func_reg = self.alloc_reg();
-                self.compile_expression_to(callee, func_reg);
+                if let ExpressionKind::MemberExpression {
+                    object,
+                    property,
+                    computed,
+                    ..
+                } = &callee.kind
+                {
+                    let obj_reg = self.alloc_reg();
+                    self.compile_expression_to(object, obj_reg);
 
-                let argc = arguments.len() as u8;
-                for (i, arg) in arguments.iter().enumerate() {
-                    let arg_reg = func_reg + 1 + i as u8;
-                    self.ensure_register(arg_reg + 1);
-                    self.compile_expression_to(arg, arg_reg);
+                    let func_reg = obj_reg + 1;
+                    self.ensure_register(func_reg + 1);
+                    if *computed {
+                        if let MemberProperty::Expression(key_expr) = property {
+                            let key_reg = self.compile_expression(key_expr);
+                            self.code.emit(Instruction::abc(
+                                Opcode::GetElem,
+                                func_reg,
+                                obj_reg,
+                                key_reg,
+                            ));
+                            self.free_reg();
+                        }
+                    } else {
+                        let name = member_property_name(property);
+                        let idx = self.add_string(&name);
+                        self.code.emit(Instruction::abc(
+                            Opcode::GetProp,
+                            func_reg,
+                            obj_reg,
+                            idx as u8,
+                        ));
+                    }
+
+                    let this_idx = self.add_string("this");
+                    self.code
+                        .emit(Instruction::abx(Opcode::SetGlobal, obj_reg, this_idx));
+
+                    let argc = arguments.len() as u8;
+                    for (i, arg) in arguments.iter().enumerate() {
+                        let arg_reg = func_reg + 1 + i as u8;
+                        self.ensure_register(arg_reg + 1);
+                        self.compile_expression_to(arg, arg_reg);
+                    }
+                    self.next_register = func_reg + 1 + argc;
+
+                    self.code
+                        .emit(Instruction::abc(Opcode::Call, dest, func_reg, argc));
+                } else {
+                    let func_reg = self.alloc_reg();
+                    self.compile_expression_to(callee, func_reg);
+
+                    let argc = arguments.len() as u8;
+                    for (i, arg) in arguments.iter().enumerate() {
+                        let arg_reg = func_reg + 1 + i as u8;
+                        self.ensure_register(arg_reg + 1);
+                        self.compile_expression_to(arg, arg_reg);
+                    }
+                    self.next_register = func_reg + 1 + argc;
+
+                    self.code
+                        .emit(Instruction::abc(Opcode::Call, dest, func_reg, argc));
                 }
-                self.next_register = func_reg + 1 + argc;
-
-                self.code
-                    .emit(Instruction::abc(Opcode::Call, dest, func_reg, argc));
             }
             ExpressionKind::NewExpression {
                 callee,
@@ -615,8 +741,12 @@ impl Compiler {
                     .emit(Instruction::abx(Opcode::CreateClosure, dest, idx));
             }
             ExpressionKind::ClassExpression(class) => {
-                let _ = class;
-                self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+                let ctor_reg = self.compile_class(class);
+                if dest != ctor_reg {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, ctor_reg, 0));
+                }
+                self.free_reg();
             }
             ExpressionKind::SpreadElement(inner) => {
                 let inner_reg = self.compile_expression(inner);
