@@ -833,4 +833,123 @@ mod tests {
             .unwrap();
         assert!(result.to_number() == 1.0);
     }
+
+    #[test]
+    fn date_now() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Date.now() > 0;").unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn date_constructor() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let d = new Date(); return d.getTime() > 0;")
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn date_from_ms() {
+        let mut engine = Engine::new();
+        let result = engine.eval("let d = new Date(0); return d.getTime();").unwrap();
+        assert!(result.to_number() == 0.0);
+    }
+
+    #[test]
+    fn date_get_full_year() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval("let d = new Date(1700000000000); return d.getFullYear();")
+            .unwrap();
+        assert!(result.to_number() == 2023.0);
+    }
+
+    #[test]
+    fn date_to_iso_string() {
+        let mut engine = Engine::new();
+        let result = engine.eval("let d = new Date(0); return d.toISOString();").unwrap();
+        assert!(result.is_string());
+        assert!(
+            engine.vm().value_to_string(result).starts_with("1970-01-01"),
+            "expected ISO string starting with 1970-01-01"
+        );
+    }
+
+    #[test]
+    fn symbol_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let s = Symbol("test"); return typeof s;"#)
+            .unwrap();
+        assert!(result.is_string());
+        assert_eq!(engine.vm().value_to_string(result), "symbol");
+    }
+
+    #[test]
+    fn symbol_unique() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let a = Symbol("x"); let b = Symbol("x"); return a === b;"#)
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn symbol_for_shared() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let a = Symbol.for("shared");
+                let b = Symbol.for("shared");
+                return a === b;
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn regexp_test() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let re = new RegExp("hello");
+                return re.test("hello world");
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn regexp_test_fail() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let re = new RegExp("xyz");
+                return re.test("hello world");
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn regexp_digit() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let re = new RegExp("\\d+");
+                return re.test("abc123");
+            "#,
+            )
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
 }
