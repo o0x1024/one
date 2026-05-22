@@ -43,6 +43,8 @@ impl Lexer<'_> {
                     return TokenKind::NoSubstitutionTemplate(value);
                 }
                 Some(b'$') if self.peek_byte_at(1) == Some(b'{') => {
+                    self.advance();
+                    self.advance();
                     let _ = start;
                     return TokenKind::TemplateHead(value);
                 }
@@ -62,6 +64,37 @@ impl Lexer<'_> {
         }
         let _ = start;
         TokenKind::NoSubstitutionTemplate(value)
+    }
+
+    pub(super) fn scan_template_part_inner(&mut self) -> TokenKind {
+        let mut value = String::new();
+        loop {
+            match self.peek_byte() {
+                None => break,
+                Some(b'`') => {
+                    self.advance();
+                    return TokenKind::TemplateTail(value);
+                }
+                Some(b'$') if self.peek_byte_at(1) == Some(b'{') => {
+                    self.advance();
+                    self.advance();
+                    return TokenKind::TemplateMiddle(value);
+                }
+                Some(b'\\') => {
+                    self.advance();
+                    if let Some(ch) = self.scan_escape_sequence() {
+                        value.push(ch);
+                    }
+                }
+                Some(b) => {
+                    if let Some(ch) = self.decode_char(b) {
+                        value.push(ch);
+                    }
+                    self.advance();
+                }
+            }
+        }
+        TokenKind::TemplateTail(value)
     }
 
     pub(super) fn scan_escape_sequence(&mut self) -> Option<char> {

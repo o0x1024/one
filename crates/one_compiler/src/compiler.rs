@@ -924,13 +924,17 @@ impl Compiler {
                 left,
                 right,
             } => {
-                let left_reg = self.compile_expression(left);
-                let right_reg = self.compile_expression(right);
-                let op = binary_opcode(*operator);
-                self.code
-                    .emit(Instruction::abc(op, dest, left_reg, right_reg));
-                self.free_reg();
-                self.free_reg();
+                if *operator == BinaryOp::NullishCoalescing {
+                    self.compile_nullish_coalescing(left, right, dest);
+                } else {
+                    let left_reg = self.compile_expression(left);
+                    let right_reg = self.compile_expression(right);
+                    let op = binary_opcode(*operator);
+                    self.code
+                        .emit(Instruction::abc(op, dest, left_reg, right_reg));
+                    self.free_reg();
+                    self.free_reg();
+                }
             }
             ExpressionKind::LogicalExpression {
                 operator,
@@ -977,16 +981,51 @@ impl Compiler {
                 object,
                 property,
                 computed,
-                ..
+                optional,
             } => {
                 let obj_reg = self.compile_expression(object);
-                if *computed {
+                if *optional {
+                    let jump_nullish = self.code.emit(Instruction::asbx(
+                        Opcode::JumpIfNullish,
+                        obj_reg,
+                        0,
+                    ));
+                    if *computed {
+                        if let MemberProperty::Expression(key_expr) = property {
+                            let key_reg = self.compile_expression(key_expr);
+                            self.code.emit(Instruction::abc(
+                                Opcode::GetElem,
+                                dest,
+                                obj_reg,
+                                key_reg,
+                            ));
+                            self.free_reg();
+                        }
+                    } else {
+                        let name = member_property_name(property);
+                        let idx = self.add_string(&name);
+                        self.code.emit(Instruction::abc(
+                            Opcode::GetProp,
+                            dest,
+                            obj_reg,
+                            idx as u8,
+                        ));
+                    }
+                    self.free_reg();
+                    let jump_end = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    let nullish_start = self.code.current_offset();
+                    self.code.patch_jump(jump_nullish, nullish_start);
+                    self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_end, end);
+                } else if *computed {
                     if let MemberProperty::Expression(key_expr) = property {
                         let key_reg = self.compile_expression(key_expr);
                         self.code
                             .emit(Instruction::abc(Opcode::GetElem, dest, obj_reg, key_reg));
                         self.free_reg();
                     }
+                    self.free_reg();
                 } else {
                     let name = member_property_name(property);
                     let idx = self.add_string(&name);
@@ -996,19 +1035,37 @@ impl Compiler {
                         obj_reg,
                         idx as u8,
                     ));
+                    self.free_reg();
                 }
-                self.free_reg();
             }
             ExpressionKind::CallExpression {
                 callee,
                 arguments,
-                ..
+                optional,
             } => {
-                if let ExpressionKind::MemberExpression {
+                if *optional {
+                    let func_reg = self.compile_expression(callee);
+                    let jump_nullish = self.code.emit(Instruction::asbx(
+                        Opcode::JumpIfNullish,
+                        func_reg,
+                        0,
+                    ));
+                    let argc = self.compile_call_arguments(arguments, func_reg);
+                    self.next_register = func_reg + 1 + argc;
+                    self.code
+                        .emit(Instruction::abc(Opcode::Call, dest, func_reg, argc));
+                    self.free_reg();
+                    let jump_end = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    let nullish_start = self.code.current_offset();
+                    self.code.patch_jump(jump_nullish, nullish_start);
+                    self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_end, end);
+                } else if let ExpressionKind::MemberExpression {
                     object,
                     property,
                     computed,
-                    ..
+                    optional: false,
                 } = &callee.kind
                 {
                     let obj_reg = self.alloc_reg();
@@ -1042,12 +1099,7 @@ impl Compiler {
                     self.code
                         .emit(Instruction::abx(Opcode::SetGlobal, obj_reg, this_idx));
 
-                    let argc = arguments.len() as u8;
-                    for (i, arg) in arguments.iter().enumerate() {
-                        let arg_reg = func_reg + 1 + i as u8;
-                        self.ensure_register(arg_reg + 1);
-                        self.compile_expression_to(arg, arg_reg);
-                    }
+                    let argc = self.compile_call_arguments(arguments, func_reg);
                     self.next_register = func_reg + 1 + argc;
 
                     self.code
@@ -1056,12 +1108,7 @@ impl Compiler {
                     let func_reg = self.alloc_reg();
                     self.compile_expression_to(callee, func_reg);
 
-                    let argc = arguments.len() as u8;
-                    for (i, arg) in arguments.iter().enumerate() {
-                        let arg_reg = func_reg + 1 + i as u8;
-                        self.ensure_register(arg_reg + 1);
-                        self.compile_expression_to(arg, arg_reg);
-                    }
+                    let argc = self.compile_call_arguments(arguments, func_reg);
                     self.next_register = func_reg + 1 + argc;
 
                     self.code
@@ -1115,18 +1162,25 @@ impl Compiler {
                 }
             }
             ExpressionKind::ArrayExpression(elements) => {
-                let len = elements.len() as u8;
-                self.code.emit(Instruction::abc(Opcode::CreateArray, dest, len, 0));
-                for (i, elem) in elements.iter().enumerate() {
-                    if let Some(expr) = elem {
-                        let val_reg = self.compile_expression(expr);
-                        self.code.emit(Instruction::abc(
-                            Opcode::SetArrayElem,
-                            dest,
-                            i as u8,
-                            val_reg,
-                        ));
-                        self.free_reg();
+                self.code
+                    .emit(Instruction::abc(Opcode::CreateArray, dest, 0, 0));
+                for expr in elements.iter().flatten() {
+                    match &expr.kind {
+                        ExpressionKind::SpreadElement(inner) => {
+                            let spread_reg = self.compile_expression(inner);
+                            self.code.emit(Instruction::abc(
+                                Opcode::Spread,
+                                dest,
+                                spread_reg,
+                                0,
+                            ));
+                            self.free_reg();
+                        }
+                        _ => {
+                            let val_reg = self.compile_expression(expr);
+                            self.compile_array_append(dest, val_reg);
+                            self.free_reg();
+                        }
                     }
                 }
             }
@@ -1173,10 +1227,14 @@ impl Compiler {
             ExpressionKind::ParenthesizedExpression(inner) => {
                 self.compile_expression_to(inner, dest);
             }
+            ExpressionKind::TemplateLiteral(template) => {
+                self.compile_template_literal(template, dest);
+            }
+            ExpressionKind::TaggedTemplateExpression { .. } => {
+                self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+            }
             ExpressionKind::BigIntLiteral(_)
             | ExpressionKind::RegExpLiteral { .. }
-            | ExpressionKind::TemplateLiteral(_)
-            | ExpressionKind::TaggedTemplateExpression { .. }
             | ExpressionKind::YieldExpression { .. }
             | ExpressionKind::AwaitExpression(_)
             | ExpressionKind::MetaProperty { .. }
@@ -1184,6 +1242,148 @@ impl Compiler {
                 self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
             }
         }
+    }
+
+    fn compile_nullish_coalescing(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        dest: u8,
+    ) {
+        let left_reg = self.compile_expression(left);
+        let jump_nullish = self
+            .code
+            .emit(Instruction::asbx(Opcode::JumpIfNullish, left_reg, 0));
+        self.code
+            .emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
+        self.free_reg();
+        let jump_end = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+        let alternate_start = self.code.current_offset();
+        self.code.patch_jump(jump_nullish, alternate_start);
+        self.compile_expression_to(right, dest);
+        let end = self.code.current_offset();
+        self.code.patch_jump(jump_end, end);
+    }
+
+    fn compile_template_literal(&mut self, template: &TemplateLiteral, dest: u8) {
+        let first_quasi = template
+            .quasis
+            .first()
+            .map(|q| q.value.as_str())
+            .unwrap_or("");
+        let idx = self
+            .code
+            .add_constant(Constant::String(first_quasi.to_string()));
+        self.code.emit(Instruction::abx(Opcode::LoadConst, dest, idx));
+
+        for (i, expr) in template.expressions.iter().enumerate() {
+            let expr_reg = self.compile_expression(expr);
+            self.code
+                .emit(Instruction::abc(Opcode::Add, dest, dest, expr_reg));
+            self.free_reg();
+
+            let quasi = &template.quasis[i + 1].value;
+            let quasi_reg = self.alloc_reg();
+            let qidx = self
+                .code
+                .add_constant(Constant::String(quasi.clone()));
+            self.code
+                .emit(Instruction::abx(Opcode::LoadConst, quasi_reg, qidx));
+            self.code
+                .emit(Instruction::abc(Opcode::Add, dest, dest, quasi_reg));
+            self.free_reg();
+        }
+    }
+
+    fn compile_array_append(&mut self, arr_reg: u8, val_reg: u8) {
+        let len_reg = self.alloc_reg();
+        let length_idx = self.add_string("length");
+        self.code.emit(Instruction::abc(
+            Opcode::GetProp,
+            len_reg,
+            arr_reg,
+            length_idx as u8,
+        ));
+        self.code
+            .emit(Instruction::abc(Opcode::SetElem, arr_reg, len_reg, val_reg));
+        self.free_reg();
+    }
+
+    fn compile_call_arguments(&mut self, arguments: &[Expression], func_reg: u8) -> u8 {
+        let mut argc: u8 = 0;
+        for arg in arguments {
+            match &arg.kind {
+                ExpressionKind::SpreadElement(inner) => {
+                    let spread_reg = self.compile_expression(inner);
+                    let temp_arr = self.alloc_reg();
+                    self.code
+                        .emit(Instruction::abc(Opcode::CreateArray, temp_arr, 0, 0));
+                    self.code.emit(Instruction::abc(
+                        Opcode::Spread,
+                        temp_arr,
+                        spread_reg,
+                        0,
+                    ));
+                    self.free_reg();
+
+                    let len_reg = self.alloc_reg();
+                    let idx_reg = self.alloc_reg();
+                    let one_reg = self.alloc_reg();
+                    let length_idx = self.add_string("length");
+                    self.code.emit(Instruction::abc(
+                        Opcode::GetProp,
+                        len_reg,
+                        temp_arr,
+                        length_idx as u8,
+                    ));
+                    self.code.emit(Instruction::asbx(Opcode::LoadInt, idx_reg, 0));
+                    self.code.emit(Instruction::asbx(Opcode::LoadInt, one_reg, 1));
+
+                    let loop_start = self.code.current_offset();
+                    let cmp_reg = self.alloc_reg();
+                    self.code
+                        .emit(Instruction::abc(Opcode::Lt, cmp_reg, idx_reg, len_reg));
+                    let jump_end = self
+                        .code
+                        .emit(Instruction::asbx(Opcode::JumpIfFalse, cmp_reg, 0));
+                    self.free_reg();
+
+                    let elem_reg = self.alloc_reg();
+                    self.code.emit(Instruction::abc(
+                        Opcode::GetElem,
+                        elem_reg,
+                        temp_arr,
+                        idx_reg,
+                    ));
+                    let arg_reg = func_reg + 1 + argc;
+                    self.ensure_register(arg_reg + 1);
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, arg_reg, elem_reg, 0));
+                    self.free_reg();
+                    argc = argc.saturating_add(1);
+
+                    self.code
+                        .emit(Instruction::abc(Opcode::Add, idx_reg, idx_reg, one_reg));
+                    let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    self.code.patch_jump(jump_back, loop_start);
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_end, end);
+
+                    self.free_reg();
+                    self.free_reg();
+                    self.free_reg();
+                    self.free_reg();
+                    self.free_reg();
+                }
+                _ => {
+                    let arg_reg = func_reg + 1 + argc;
+                    self.ensure_register(arg_reg + 1);
+                    self.compile_expression_to(arg, arg_reg);
+                    argc = argc.saturating_add(1);
+                }
+            }
+        }
+        argc
     }
 
     fn ensure_register(&mut self, count: u8) {

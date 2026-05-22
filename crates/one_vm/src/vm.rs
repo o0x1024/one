@@ -781,6 +781,14 @@ impl Vm {
                             (self.frames[frame_idx].pc as i32 + offset) as usize;
                     }
                 }
+                Opcode::JumpIfNullish => {
+                    let val = self.stack[base + instr.a() as usize];
+                    if val.is_nullish() {
+                        let offset = instr.sbx() as i32;
+                        self.frames[frame_idx].pc =
+                            (self.frames[frame_idx].pc as i32 + offset) as usize;
+                    }
+                }
                 Opcode::GetGlobal => {
                     let dest = instr.a();
                     let name_idx = instr.bx() as usize;
@@ -988,6 +996,11 @@ impl Vm {
                             *length = index as u32 + 1;
                         }
                     }
+                }
+                Opcode::Spread => {
+                    let dest_arr = self.stack[base + instr.a() as usize];
+                    let src_val = self.stack[base + instr.b() as usize];
+                    self.spread_into_array(dest_arr, src_val);
                 }
                 Opcode::CreateClosure => {
                     let dest = instr.a();
@@ -1260,6 +1273,39 @@ impl Vm {
             }
         }
         format!("{val}")
+    }
+
+    fn spread_into_array(&mut self, dest_arr: JsValue, src_val: JsValue) {
+        let elements = if let Some(src_obj) = self.get_object(src_val) {
+            if let ObjectKind::Array { length } = src_obj.kind() {
+                (0..*length)
+                    .map(|i| {
+                        src_obj
+                            .get_property(&i.to_string())
+                            .unwrap_or(JsValue::undefined())
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                return;
+            }
+        } else {
+            return;
+        };
+
+        let Some(dest_obj) = self.get_object_mut(dest_arr) else {
+            return;
+        };
+        let start = match dest_obj.kind() {
+            ObjectKind::Array { length } => *length,
+            _ => 0,
+        };
+
+        for (offset, val) in elements.iter().enumerate() {
+            dest_obj.set_property((start + offset as u32).to_string(), *val);
+        }
+        if let ObjectKind::Array { length } = dest_obj.kind_mut() {
+            *length = start + elements.len() as u32;
+        }
     }
 
     fn is_truthy(&self, val: JsValue) -> bool {

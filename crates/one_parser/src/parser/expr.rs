@@ -245,7 +245,19 @@ impl Parser<'_> {
                 TokenKind::QuestionDot => {
                     let start = expr.span.start;
                     self.advance();
-                    if self.at(&TokenKind::LBracket) {
+                    if self.at(&TokenKind::LParen) {
+                        self.advance();
+                        let arguments = self.parse_arguments()?;
+                        self.expect(&TokenKind::RParen)?;
+                        expr = Expression {
+                            kind: ExpressionKind::CallExpression {
+                                callee: Box::new(expr),
+                                arguments,
+                                optional: true,
+                            },
+                            span: self.span_from(start),
+                        };
+                    } else if self.at(&TokenKind::LBracket) {
                         self.advance();
                         let property = self.parse_expression()?;
                         self.expect(&TokenKind::RBracket)?;
@@ -380,6 +392,16 @@ impl Parser<'_> {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
+                if self.eat(&TokenKind::Arrow) {
+                    let params = vec![Pattern {
+                        kind: PatternKind::Identifier {
+                            name,
+                            type_annotation: None,
+                        },
+                        span: self.span_from(start),
+                    }];
+                    return self.finish_arrow_function(params, false, start);
+                }
                 Ok(Expression {
                     kind: ExpressionKind::Identifier(name),
                     span: self.span_from(start),
@@ -703,25 +725,32 @@ impl Parser<'_> {
                 });
                 loop {
                     expressions.push(self.parse_expression()?);
-                    let quasi_start = self.current.span.start;
-                    match &self.current.kind {
+                    if !self.at(&TokenKind::RBrace) {
+                        return Err(self.error("expected '}' after template expression"));
+                    }
+                    self.lexer.consume_closing_template_brace();
+                    let quasi_start = self.lexer.position() as u32;
+                    let part = self.lexer.scan_template_part();
+                    match part {
                         TokenKind::TemplateMiddle(s) => {
-                            let s = s.clone();
-                            self.advance();
                             quasis.push(TemplateElement {
                                 value: s,
                                 tail: false,
                                 span: self.span_from(quasi_start),
                             });
+                            let next = self.lexer.next_token();
+                            self.previous_end = next.span.end;
+                            self.current = next;
                         }
                         TokenKind::TemplateTail(s) => {
-                            let s = s.clone();
-                            self.advance();
                             quasis.push(TemplateElement {
                                 value: s,
                                 tail: true,
                                 span: self.span_from(quasi_start),
                             });
+                            let next = self.lexer.next_token();
+                            self.previous_end = next.span.end;
+                            self.current = next;
                             break;
                         }
                         _ => return Err(self.error("expected template continuation")),

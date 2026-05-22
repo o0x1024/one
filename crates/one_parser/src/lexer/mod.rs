@@ -39,6 +39,17 @@ impl<'a> Lexer<'a> {
     pub fn position(&self) -> usize {
         self.pos
     }
+
+    pub fn scan_template_part(&mut self) -> TokenKind {
+        self.scan_template_part_inner()
+    }
+
+    pub fn consume_closing_template_brace(&mut self) {
+        if self.peek_byte() == Some(b'}') {
+            self.advance();
+        }
+    }
+
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
         let start = self.pos;

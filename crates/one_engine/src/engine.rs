@@ -1152,4 +1152,121 @@ mod tests {
         assert!(r1.to_number() == 1.0);
         assert!(r2.to_number() == 1.0);
     }
+
+    #[test]
+    fn arrow_function_basic() {
+        let result = run("let add = (a, b) => a + b; return add(3, 4);");
+        assert!(result.to_number() == 7.0);
+    }
+
+    #[test]
+    fn arrow_function_single_param() {
+        let result = run("let double = x => x * 2; return double(5);");
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn arrow_function_body() {
+        let result = run(
+            r#"
+            let calc = (x) => {
+                let y = x * 2;
+                return y + 1;
+            };
+            return calc(5);
+        "#,
+        );
+        assert!(result.to_number() == 11.0);
+    }
+
+    #[test]
+    fn arrow_function_no_params() {
+        let result = run("let greet = () => 42; return greet();");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn arrow_in_map() {
+        let result = run(
+            r#"
+            let arr = [1, 2, 3];
+            let doubled = arr.map(x => x * 2);
+            return doubled[0] + doubled[1] + doubled[2];
+        "#,
+        );
+        assert!(result.to_number() == 12.0);
+    }
+
+    #[test]
+    fn template_literal_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let name = "world"; return `hello ${name}`;"#)
+            .unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "hello world");
+    }
+
+    #[test]
+    fn template_literal_expression() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"let x = 5; return `result: ${x * 2}`;"#)
+            .unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "result: 10");
+    }
+
+    #[test]
+    fn template_literal_no_interpolation() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return `hello world`;"#).unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "hello world");
+    }
+
+    #[test]
+    fn optional_chaining_defined() {
+        let result = run("let obj = {a: {b: 42}}; return obj?.a?.b;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn optional_chaining_null() {
+        let result = run("let obj = null; return obj?.a;");
+        assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn optional_chaining_deep() {
+        let result = run("let obj = {a: null}; return obj?.a?.b;");
+        assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn nullish_coalescing_null() {
+        let result = run("let x = null; return x ?? 42;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn nullish_coalescing_undefined() {
+        let result = run("let x; return x ?? 42;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn nullish_coalescing_defined() {
+        let result = run("let x = 10; return x ?? 42;");
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn nullish_coalescing_zero() {
+        let result = run("let x = 0; return x ?? 42;");
+        assert!(result.to_number() == 0.0);
+    }
+
+    #[test]
+    fn nullish_coalescing_empty_string() {
+        let result = run(r#"let x = ""; return x ?? "default";"#);
+        assert!(result.is_string());
+    }
 }

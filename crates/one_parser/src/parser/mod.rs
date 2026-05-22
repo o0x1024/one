@@ -479,6 +479,54 @@ mod tests {
     }
 
     #[test]
+    fn tokenize_template_interpolation() {
+        use crate::lexer::Lexer;
+        let mut lexer = Lexer::new(r#"return `hello ${name}`;"#);
+        let mut kinds = Vec::new();
+        loop {
+            let tok = lexer.next_token();
+            if tok.kind == TokenKind::Eof {
+                break;
+            }
+            kinds.push(tok.kind);
+        }
+        assert!(
+            matches!(
+                kinds.as_slice(),
+                [
+                    TokenKind::Return,
+                    TokenKind::TemplateHead(_),
+                    TokenKind::Identifier(_),
+                    TokenKind::RBrace,
+                    ..
+                ]
+            ),
+            "tokens: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn parse_template_interpolation() {
+        let expr = parse_expr("`hello ${name}`;");
+        assert!(matches!(&expr.kind, ExpressionKind::TemplateLiteral(_)));
+    }
+
+    #[test]
+    fn parse_template_interpolation_program() {
+        let prog = parse(r#"let name = "world"; return `hello ${name}`;"#);
+        assert_eq!(prog.body.len(), 2);
+    }
+
+    #[test]
+    fn parse_template_expression() {
+        let expr = parse_expr("`result: ${5 * 2}`;");
+        assert!(matches!(
+            &expr.kind,
+            ExpressionKind::TemplateLiteral(_)
+        ));
+    }
+
+    #[test]
     fn parse_arrow_function() {
         let expr = parse_expr("(x) => x + 1;");
         assert!(matches!(
