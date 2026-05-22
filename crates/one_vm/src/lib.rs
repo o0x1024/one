@@ -391,4 +391,60 @@ mod tests {
         );
         assert!(result.to_number() == -1.0);
     }
+
+    #[test]
+    fn array_element_access() {
+        let result = run("let arr = [10, 20, 30]; return arr[1];");
+        assert!(result.to_number() == 20.0);
+    }
+
+    #[test]
+    fn array_destructuring() {
+        let result = run("let arr = [1, 2, 3]; let [a, b, c] = arr; return b;");
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn object_destructuring() {
+        let result = run(r#"let obj = {x: 10, y: 20}; let {x, y} = obj; return x + y;"#);
+        assert!(result.to_number() == 30.0);
+    }
+
+    #[test]
+    fn for_of_array() {
+        let result = run(
+            r#"
+            let sum = 0;
+            let arr = [1, 2, 3, 4, 5];
+            for (let x of arr) {
+                sum = sum + x;
+            }
+            return sum;
+        "#,
+        );
+        assert!(result.to_number() == 15.0);
+    }
+
+    #[test]
+    fn computed_property_set() {
+        let result = run(
+            r#"
+            let obj = {};
+            obj["key"] = 42;
+            return obj["key"];
+        "#,
+        );
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn array_push_read() {
+        let result = run(
+            r#"
+            let arr = [10, 20];
+            return arr[0] + arr[1];
+        "#,
+        );
+        assert!(result.to_number() == 30.0);
+    }
 }

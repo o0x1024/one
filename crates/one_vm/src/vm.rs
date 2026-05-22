@@ -327,6 +327,51 @@ impl Vm {
                         self.stack[base + dest as usize] = JsValue::undefined();
                     }
                 }
+                Opcode::GetElem => {
+                    let dest = instr.a();
+                    let obj_val = self.stack[base + instr.b() as usize];
+                    let key_val = self.stack[base + instr.c() as usize];
+
+                    if let Some(obj) = self.get_object(obj_val) {
+                        let key_str = if key_val.is_int32() {
+                            key_val.as_i32().unwrap().to_string()
+                        } else if key_val.is_float64() {
+                            let n = key_val.as_f64().unwrap();
+                            if n.fract() == 0.0 && n >= 0.0 {
+                                (n as u32).to_string()
+                            } else {
+                                self.value_to_string(key_val)
+                            }
+                        } else {
+                            self.value_to_string(key_val)
+                        };
+                        let value = obj.get_property(&key_str).unwrap_or(JsValue::undefined());
+                        self.stack[base + dest as usize] = value;
+                    } else {
+                        self.stack[base + dest as usize] = JsValue::undefined();
+                    }
+                }
+                Opcode::SetElem => {
+                    let obj_val = self.stack[base + instr.a() as usize];
+                    let key_val = self.stack[base + instr.b() as usize];
+                    let value = self.stack[base + instr.c() as usize];
+
+                    let key_str = if key_val.is_int32() {
+                        key_val.as_i32().unwrap().to_string()
+                    } else {
+                        self.value_to_string(key_val)
+                    };
+
+                    if let Some(obj) = self.get_object_mut(obj_val) {
+                        if let ObjectKind::Array { length } = obj.kind_mut()
+                            && let Ok(idx) = key_str.parse::<u32>()
+                            && idx >= *length
+                        {
+                            *length = idx + 1;
+                        }
+                        obj.set_property(key_str, value);
+                    }
+                }
                 Opcode::SetProp => {
                     let obj_val = self.stack[base + instr.a() as usize];
                     let name_idx = instr.b() as usize;

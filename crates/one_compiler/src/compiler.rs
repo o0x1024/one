@@ -147,11 +147,13 @@ impl Compiler {
                     self.code.patch_jump(jump_back, loop_start);
                 }
             }
-            StatementKind::ForInStatement { right, body, .. }
-            | StatementKind::ForOfStatement { right, body, .. } => {
+            StatementKind::ForInStatement { right, body, .. } => {
                 let _right_reg = self.compile_expression(right);
                 self.free_reg();
                 self.compile_statement(body);
+            }
+            StatementKind::ForOfStatement { left, right, body, .. } => {
+                self.compile_for_of(left, right, body);
             }
             StatementKind::SwitchStatement {
                 discriminant,
@@ -342,8 +344,12 @@ impl Compiler {
     }
 
     fn compile_variable_declarator(&mut self, declarator: &VariableDeclarator) {
-        if let Some(init) = &declarator.init {
-            if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
+        let Some(init) = &declarator.init else {
+            return;
+        };
+
+        match &declarator.id.kind {
+            PatternKind::Identifier { name, .. } => {
                 let reg = if let Some(&existing) = self.locals.get(name) {
                     existing
                 } else {
@@ -352,16 +358,153 @@ impl Compiler {
                     r
                 };
                 self.compile_expression_to(init, reg);
-                return;
             }
+            PatternKind::ArrayPattern { elements, .. } => {
+                let arr_reg = self.compile_expression(init);
+                for (i, elem) in elements.iter().enumerate() {
+                    if let Some(pat) = elem {
+                        let elem_reg = self.alloc_reg();
+                        let idx_reg = self.alloc_reg();
+                        self.code
+                            .emit(Instruction::asbx(Opcode::LoadInt, idx_reg, i as i16));
+                        self.code.emit(Instruction::abc(
+                            Opcode::GetElem,
+                            elem_reg,
+                            arr_reg,
+                            idx_reg,
+                        ));
+                        self.free_reg();
+                        if !self.compile_pattern_binding(pat, elem_reg) {
+                            self.free_reg();
+                        }
+                    }
+                }
+                self.free_reg();
+            }
+            PatternKind::ObjectPattern { properties, .. } => {
+                let obj_reg = self.compile_expression(init);
+                for prop in properties {
+                    let key_name = property_key_name(&prop.key);
+                    let elem_reg = self.alloc_reg();
+                    let key_idx = self.add_string(&key_name);
+                    self.code.emit(Instruction::abc(
+                        Opcode::GetProp,
+                        elem_reg,
+                        obj_reg,
+                        key_idx as u8,
+                    ));
+                    if !self.compile_pattern_binding(&prop.value, elem_reg) {
+                        self.free_reg();
+                    }
+                }
+                self.free_reg();
+            }
+            _ => {
+                let _value_reg = self.compile_expression(init);
+                self.free_reg();
+            }
+        }
+    }
 
-            let value_reg = self.compile_expression(init);
-            if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
-                let name_idx = self.add_string(name);
-                self.code
-                    .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+    /// Bind `value_reg` to a destructuring pattern. Returns true if `value_reg` was
+    /// consumed as a new local (caller must not free it).
+    fn compile_pattern_binding(&mut self, pat: &Pattern, value_reg: u8) -> bool {
+        match &pat.kind {
+            PatternKind::Identifier { name, .. } => {
+                if let Some(&local_reg) = self.locals.get(name) {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, local_reg, value_reg, 0));
+                    false
+                } else {
+                    self.locals.insert(name.clone(), value_reg);
+                    true
+                }
             }
+            _ => false,
+        }
+    }
+
+    fn compile_for_of(&mut self, left: &ForInOfLeft, right: &Expression, body: &Statement) {
+        let iter_reg = self.compile_expression(right);
+
+        let idx_reg = self.alloc_reg();
+        self.code.emit(Instruction::asbx(Opcode::LoadInt, idx_reg, 0));
+
+        let loop_start = self.code.current_offset();
+
+        let len_reg = self.alloc_reg();
+        let length_const = self.add_string("length");
+        self.code.emit(Instruction::abc(
+            Opcode::GetProp,
+            len_reg,
+            iter_reg,
+            length_const as u8,
+        ));
+
+        let cmp_reg = self.alloc_reg();
+        self.code
+            .emit(Instruction::abc(Opcode::Lt, cmp_reg, idx_reg, len_reg));
+        let jump_end = self
+            .code
+            .emit(Instruction::asbx(Opcode::JumpIfFalse, cmp_reg, 0));
+        self.free_reg();
+        self.free_reg();
+
+        let elem_reg = self.alloc_reg();
+        self.code.emit(Instruction::abc(
+            Opcode::GetElem,
+            elem_reg,
+            iter_reg,
+            idx_reg,
+        ));
+
+        let bound_local = self.compile_for_of_left(left, elem_reg);
+
+        self.compile_statement(body);
+
+        let one_reg = self.alloc_reg();
+        self.code.emit(Instruction::asbx(Opcode::LoadInt, one_reg, 1));
+        self.code
+            .emit(Instruction::abc(Opcode::Add, idx_reg, idx_reg, one_reg));
+        self.free_reg();
+
+        let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+        self.code.patch_jump(jump_back, loop_start);
+
+        let end = self.code.current_offset();
+        self.code.patch_jump(jump_end, end);
+
+        if !bound_local {
             self.free_reg();
+        }
+        self.free_reg();
+        self.free_reg();
+    }
+
+    fn compile_for_of_left(&mut self, left: &ForInOfLeft, elem_reg: u8) -> bool {
+        match left {
+            ForInOfLeft::Declaration(decl) => {
+                if let DeclarationKind::VariableDeclaration { declarations, .. } = &decl.kind
+                    && let Some(d) = declarations.first()
+                {
+                    return self.compile_pattern_binding(&d.id, elem_reg);
+                }
+                false
+            }
+            ForInOfLeft::Pattern(pat) => self.compile_pattern_binding(pat, elem_reg),
+            ForInOfLeft::Expression(expr) => {
+                if let ExpressionKind::Identifier(name) = &expr.kind {
+                    if let Some(&local_reg) = self.locals.get(name) {
+                        self.code
+                            .emit(Instruction::abc(Opcode::Move, local_reg, elem_reg, 0));
+                    } else {
+                        let name_idx = self.add_string(name);
+                        self.code
+                            .emit(Instruction::abx(Opcode::SetGlobal, elem_reg, name_idx));
+                    }
+                }
+                false
+            }
         }
     }
 

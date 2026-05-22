@@ -107,6 +107,11 @@ impl JsObject {
     }
 
     pub fn get_property(&self, key: &str) -> Option<JsValue> {
+        if key == "length"
+            && let ObjectKind::Array { length } = &self.kind
+        {
+            return Some(JsValue::from_i32(*length as i32));
+        }
         if let Some(prop) = self.properties.get(key) {
             return Some(prop.value);
         }

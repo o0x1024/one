@@ -540,6 +540,84 @@ impl Parser<'_> {
                     span: self.span_from(start),
                 })
             }
+            TokenKind::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                let mut rest = None;
+                while !self.at(&TokenKind::RBracket) && !self.at_eof() {
+                    if self.eat(&TokenKind::Comma) {
+                        elements.push(None);
+                        if self.at(&TokenKind::RBracket) {
+                            break;
+                        }
+                        continue;
+                    }
+                    if self.at(&TokenKind::DotDotDot) {
+                        self.advance();
+                        rest = Some(Box::new(self.parse_pattern()?));
+                        break;
+                    }
+                    elements.push(Some(self.parse_pattern()?));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBracket)?;
+                Ok(Pattern {
+                    kind: PatternKind::ArrayPattern { elements, rest },
+                    span: self.span_from(start),
+                })
+            }
+            TokenKind::LBrace => {
+                self.advance();
+                let mut properties = Vec::new();
+                let mut rest = None;
+                while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+                    if self.at(&TokenKind::DotDotDot) {
+                        self.advance();
+                        rest = Some(Box::new(self.parse_pattern()?));
+                        break;
+                    }
+                    let prop_start = self.current.span.start;
+                    let key = self.parse_property_key()?;
+                    if self.eat(&TokenKind::Colon) {
+                        let computed = matches!(&key, PropertyKey::Computed(_));
+                        let value = self.parse_pattern()?;
+                        properties.push(ObjectPatternProperty {
+                            key,
+                            value,
+                            computed,
+                            shorthand: false,
+                            span: self.span_from(prop_start),
+                        });
+                    } else {
+                        let PropertyKey::Identifier(name) = key else {
+                            return Err(self.error("expected ':' after property key"));
+                        };
+                        properties.push(ObjectPatternProperty {
+                            key: PropertyKey::Identifier(name.clone()),
+                            value: Pattern {
+                                kind: PatternKind::Identifier {
+                                    name,
+                                    type_annotation: None,
+                                },
+                                span: self.span_from(prop_start),
+                            },
+                            computed: false,
+                            shorthand: true,
+                            span: self.span_from(prop_start),
+                        });
+                    }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RBrace)?;
+                Ok(Pattern {
+                    kind: PatternKind::ObjectPattern { properties, rest },
+                    span: self.span_from(start),
+                })
+            }
             _ => Err(self.error("expected pattern")),
         }
     }
