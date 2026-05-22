@@ -1,7 +1,7 @@
 use one_vm::Vm;
 
 use crate::{
-    array, collections, console, date, error, globals, json, math, number, object, promise,
+    array, boolean, collections, console, date, error, globals, json, math, number, object, promise,
     regexp, string, symbol, timers,
 };
 
@@ -34,6 +34,9 @@ pub enum BuiltinModule {
     Globals,
 }
 
+/// Default instruction fuel for [`Preset::Sandbox`] when no explicit limit is set.
+pub const SANDBOX_DEFAULT_FUEL: u64 = 1_000_000;
+
 pub fn install_preset(vm: &mut Vm, preset: &Preset) {
     match preset {
         Preset::Full => crate::install_builtins(vm),
@@ -42,7 +45,20 @@ pub fn install_preset(vm: &mut Vm, preset: &Preset) {
             error::install_error(vm);
         }
         Preset::Sandbox => {
-            crate::install_builtins(vm);
+            console::install_console(vm);
+            promise::install_promise(vm);
+            object::install_object(vm);
+            array::install_array(vm);
+            collections::install_collections(vm);
+            string::install_string(vm);
+            number::install_number(vm);
+            boolean::install_boolean(vm);
+            math::install_math(vm);
+            json::install_json(vm);
+            error::install_error(vm);
+            date::install_date(vm);
+            symbol::install_symbol(vm);
+            regexp::install_regexp(vm);
         }
         Preset::Custom(modules) => {
             let mut collections_installed = false;

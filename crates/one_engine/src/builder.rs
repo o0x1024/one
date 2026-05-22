@@ -82,9 +82,15 @@ impl<T: 'static> EngineBuilder<T> {
             vm.set_gc_threshold(threshold);
         }
 
-        let baseline_globals = vm.snapshot_globals();
+        let fuel_limit = self.fuel_limit.or(match self.preset {
+            Preset::Sandbox => Some(crate::preset::SANDBOX_DEFAULT_FUEL),
+            _ => None,
+        });
+        if let Some(limit) = fuel_limit {
+            vm.set_fuel(limit);
+        }
 
-        let _ = self.fuel_limit;
+        let baseline_globals = vm.snapshot_globals();
 
         Engine::from_parts(
             vm,

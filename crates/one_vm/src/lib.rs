@@ -4,7 +4,7 @@ pub mod vm;
 
 pub use convert::{FromJsValue, IntoJsValue};
 pub use object::{FunctionObject, JsObject, ObjectKind, PromiseState, Property};
-pub use vm::Vm;
+pub use vm::{ExecutionHook, Vm};
 
 #[cfg(test)]
 mod tests {

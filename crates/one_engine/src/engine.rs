@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use one_compiler::{Compiler, ImportSpec, ModuleExport};
 use one_core::{CompileError, JsValue, OneError, OneResult};
 use one_parser::parser::Parser;
-use one_vm::Vm;
+use one_vm::{ExecutionHook, Vm};
 
 pub struct Engine<T: 'static = ()> {
     vm: Vm,
@@ -48,6 +48,22 @@ impl<T: 'static> Engine<T> {
     pub fn register_module(&mut self, name: &str, source: &str) {
         self.registered_modules
             .insert(name.to_string(), source.to_string());
+    }
+
+    pub fn set_fuel(&mut self, fuel: u64) {
+        self.vm.set_fuel(fuel);
+    }
+
+    pub fn remaining_fuel(&self) -> Option<u64> {
+        self.vm.remaining_fuel()
+    }
+
+    pub fn fuel_consumed(&self) -> u64 {
+        self.vm.fuel_consumed()
+    }
+
+    pub fn set_hooks(&mut self, hooks: impl ExecutionHook) {
+        self.vm.set_hooks(hooks);
     }
 
     pub fn run_event_loop(&mut self) -> OneResult<()> {
@@ -240,6 +256,7 @@ impl Default for Engine<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EngineBuilder;
 
     #[test]
     fn engine_eval_number() {
@@ -1502,5 +1519,83 @@ mod tests {
     fn ts_enum_execution() {
         let result = run("enum Color { Red, Green, Blue } return Color.Green;");
         assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn fuel_basic() {
+        let mut engine = Engine::new();
+        engine.set_fuel(1000);
+        let result = engine.eval("return 1 + 2;");
+        assert!(result.is_ok());
+        assert!(engine.fuel_consumed() > 0);
+    }
+
+    #[test]
+    fn fuel_exhausted() {
+        let mut engine = Engine::new();
+        engine.set_fuel(5);
+        let result = engine.eval("let x = 0; while(true) { x = x + 1; }");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OneError::OutOfFuel { .. }));
+    }
+
+    #[test]
+    fn fuel_sufficient() {
+        let mut engine = Engine::new();
+        engine.set_fuel(100_000);
+        let result = engine
+            .eval("let sum = 0; let i = 0; while(i < 100) { sum = sum + i; i = i + 1; } return sum;")
+            .unwrap();
+        assert!(result.to_number() == 4950.0);
+        assert!(engine.remaining_fuel().unwrap() > 0);
+    }
+
+    #[test]
+    fn fuel_remaining() {
+        let mut engine = Engine::new();
+        engine.set_fuel(10_000);
+        engine.eval("return 42;").unwrap();
+        let remaining = engine.remaining_fuel().unwrap();
+        assert!(remaining < 10_000);
+        assert!(remaining > 0);
+    }
+
+    #[test]
+    fn execution_hook_abort() {
+        struct AbortAfter100;
+
+        impl ExecutionHook for AbortAfter100 {
+            fn on_instruction(&mut self, count: u64) -> bool {
+                count < 100
+            }
+        }
+
+        let mut engine = Engine::new();
+        engine.set_hooks(AbortAfter100);
+        let result = engine.eval("let x = 0; while(true) { x = x + 1; }");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OneError::ExecutionAborted));
+    }
+
+    #[test]
+    fn sandbox_no_eval() {
+        use crate::preset::Preset;
+
+        let mut engine = EngineBuilder::<()>::new()
+            .preset(Preset::Sandbox)
+            .build();
+        let result = engine.eval("return typeof eval;").unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "undefined");
+    }
+
+    #[test]
+    fn sandbox_no_timers() {
+        use crate::preset::Preset;
+
+        let mut engine = EngineBuilder::<()>::new()
+            .preset(Preset::Sandbox)
+            .build();
+        let result = engine.eval("return typeof setTimeout;").unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "undefined");
     }
 }

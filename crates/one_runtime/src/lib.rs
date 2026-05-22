@@ -16,7 +16,7 @@ pub mod string;
 pub mod symbol;
 pub mod timers;
 
-pub use preset::{BuiltinModule, Preset, install_preset};
+pub use preset::{BuiltinModule, Preset, SANDBOX_DEFAULT_FUEL, install_preset};
 
 use one_vm::Vm;
 

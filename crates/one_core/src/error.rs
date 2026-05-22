@@ -5,6 +5,7 @@ pub enum OneError {
     JsException(JsException),
     CompileError(CompileError),
     OutOfFuel { consumed: u64 },
+    ExecutionAborted,
     OutOfMemory { requested: usize, limit: usize },
     StackOverflow { depth: usize },
     ExecutionTimeout { elapsed_ms: u64 },
@@ -79,6 +80,7 @@ impl fmt::Display for OneError {
                 }
             }
             Self::OutOfFuel { consumed } => write!(f, "out of fuel after {consumed} units"),
+            Self::ExecutionAborted => write!(f, "execution aborted"),
             Self::OutOfMemory { requested, limit } => {
                 write!(
                     f,

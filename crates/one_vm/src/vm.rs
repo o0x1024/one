@@ -41,6 +41,19 @@ struct TimerEntry {
     cancelled: bool,
 }
 
+/// Host callbacks invoked at key execution points.
+pub trait ExecutionHook: Send + 'static {
+    fn on_call(&mut self, _func_name: &str) -> bool {
+        true
+    }
+    fn on_instruction(&mut self, _count: u64) -> bool {
+        true
+    }
+    fn on_alloc(&mut self, _size: usize) -> bool {
+        true
+    }
+}
+
 #[derive(Clone)]
 enum PromiseMethodKind {
     Then,
@@ -75,6 +88,9 @@ pub struct Vm {
     symbol_counter: u32,
     symbol_descriptions: Vec<Option<String>>,
     global_symbols: HashMap<String, u32>,
+    fuel: Option<u64>,
+    fuel_consumed: u64,
+    hooks: Option<Box<dyn ExecutionHook>>,
 }
 
 impl Vm {
@@ -101,7 +117,39 @@ impl Vm {
             symbol_counter: 0,
             symbol_descriptions: Vec::new(),
             global_symbols: HashMap::new(),
+            fuel: None,
+            fuel_consumed: 0,
+            hooks: None,
         }
+    }
+
+    pub fn set_fuel(&mut self, fuel: u64) {
+        self.fuel = Some(fuel);
+    }
+
+    pub fn remaining_fuel(&self) -> Option<u64> {
+        self.fuel
+    }
+
+    pub fn fuel_consumed(&self) -> u64 {
+        self.fuel_consumed
+    }
+
+    pub fn reset_fuel(&mut self, fuel: u64) {
+        self.fuel = Some(fuel);
+        self.fuel_consumed = 0;
+    }
+
+    pub fn remove_fuel_limit(&mut self) {
+        self.fuel = None;
+    }
+
+    pub fn set_hooks(&mut self, hooks: impl ExecutionHook) {
+        self.hooks = Some(Box::new(hooks));
+    }
+
+    pub fn remove_hooks(&mut self) {
+        self.hooks = None;
     }
 
     /// Register a native host function
@@ -733,6 +781,23 @@ impl Vm {
 
     fn run_until(&mut self, stop_depth: Option<usize>) -> OneResult<JsValue> {
         loop {
+            if let Some(ref mut fuel) = self.fuel {
+                if *fuel == 0 {
+                    return Err(OneError::OutOfFuel {
+                        consumed: self.fuel_consumed,
+                    });
+                }
+                *fuel -= 1;
+            }
+            self.fuel_consumed += 1;
+
+            if self.fuel_consumed.is_multiple_of(1000)
+                && let Some(ref mut hooks) = self.hooks
+                && !hooks.on_instruction(self.fuel_consumed)
+            {
+                return Err(OneError::ExecutionAborted);
+            }
+
             let frame_idx = self.frames.len() - 1;
             let code_ptr = self.frames[frame_idx].code;
             let code = unsafe { &*code_ptr };
