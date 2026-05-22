@@ -452,4 +452,84 @@ mod tests {
             .unwrap();
         assert!(result.to_number() == 3.0);
     }
+
+    #[test]
+    fn string_length() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "hello".length;"#).unwrap();
+        assert!(result.to_number() == 5.0);
+    }
+
+    #[test]
+    fn string_to_upper() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "hello".toUpperCase();"#).unwrap();
+        assert!(result.is_string());
+        assert_eq!(engine.vm().value_to_string(result), "HELLO");
+    }
+
+    #[test]
+    fn string_includes() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"return "hello world".includes("world");"#)
+            .unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn string_split() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "a,b,c".split(",").length;"#).unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn string_trim() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "  hello  ".trim();"#).unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "hello");
+    }
+
+    #[test]
+    fn string_indexof() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "hello".indexOf("ll");"#).unwrap();
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn string_slice() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "hello".slice(1, 3);"#).unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "el");
+    }
+
+    #[test]
+    fn string_replace() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return "hello".replace("l", "r");"#).unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "herlo");
+    }
+
+    #[test]
+    fn number_is_nan() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Number.isNaN(0 / 0);").unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn number_is_integer() {
+        let mut engine = Engine::new();
+        let result = engine.eval("return Number.isInteger(42);").unwrap();
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn number_parse_int() {
+        let mut engine = Engine::new();
+        let result = engine.eval(r#"return Number.parseInt("42");"#).unwrap();
+        assert!(result.to_number() == 42.0);
+    }
 }

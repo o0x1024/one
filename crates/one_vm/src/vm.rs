@@ -175,6 +175,13 @@ impl Vm {
             .position(|(n, _)| n == name)
     }
 
+    pub fn get_primitive_method(&self, type_name: &str, method_name: &str) -> Option<JsValue> {
+        let full_name = format!("{type_name}.prototype.{method_name}");
+        self.find_host_fn(&full_name).map(|idx| {
+            JsValue::from_object_raw(HOST_SENTINEL_MASK | idx as u64)
+        })
+    }
+
     fn invoke_host_fn(&mut self, idx: usize, args: &[JsValue]) -> OneResult<JsValue> {
         if idx >= self.host_functions.len() {
             return Err(OneError::InternalError(format!(
@@ -709,6 +716,42 @@ impl Vm {
                             ));
                         }
                     };
+
+                    if obj_val.is_string() {
+                        if name == "length" {
+                            let s = self.value_to_string(obj_val);
+                            self.stack[base + dest as usize] =
+                                JsValue::from_i32(s.len() as i32);
+                            continue;
+                        }
+                        if let Some(method) = self.get_primitive_method("String", &name) {
+                            self.globals.insert("this".to_string(), obj_val);
+                            self.stack[base + dest as usize] = method;
+                            continue;
+                        }
+                        self.stack[base + dest as usize] = JsValue::undefined();
+                        continue;
+                    }
+
+                    if obj_val.is_number() {
+                        if let Some(method) = self.get_primitive_method("Number", &name) {
+                            self.globals.insert("this".to_string(), obj_val);
+                            self.stack[base + dest as usize] = method;
+                            continue;
+                        }
+                        self.stack[base + dest as usize] = JsValue::undefined();
+                        continue;
+                    }
+
+                    if obj_val.is_boolean() {
+                        if let Some(method) = self.get_primitive_method("Boolean", &name) {
+                            self.globals.insert("this".to_string(), obj_val);
+                            self.stack[base + dest as usize] = method;
+                            continue;
+                        }
+                        self.stack[base + dest as usize] = JsValue::undefined();
+                        continue;
+                    }
 
                     if let Some(obj) = self.get_object(obj_val) {
                         let value = obj.get_property(&name).unwrap_or(JsValue::undefined());
