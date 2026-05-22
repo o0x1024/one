@@ -1,6 +1,8 @@
+pub mod convert;
 pub mod object;
 pub mod vm;
 
+pub use convert::{FromJsValue, IntoJsValue};
 pub use object::{FunctionObject, JsObject, ObjectKind, PromiseState, Property};
 pub use vm::Vm;
 

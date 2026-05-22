@@ -212,6 +212,24 @@ impl<T: 'static> Engine<T> {
     pub fn vm_mut(&mut self) -> &mut Vm {
         &mut self.vm
     }
+
+    /// Set a JSON value as a global
+    pub fn set_json_global(&mut self, name: &str, value: &serde_json::Value) {
+        let js_val = crate::serde::json_to_js(self.vm_mut(), value);
+        self.vm_mut().set_global(name, js_val);
+    }
+
+    /// Get a global value as JSON
+    pub fn get_json_global(&self, name: &str) -> serde_json::Value {
+        let js_val = self.vm().get_global(name);
+        crate::serde::js_to_json(self.vm(), js_val)
+    }
+
+    /// Evaluate and return result as JSON
+    pub fn eval_to_json(&mut self, source: &str) -> OneResult<serde_json::Value> {
+        let result = self.eval(source)?;
+        Ok(crate::serde::js_to_json(self.vm(), result))
+    }
 }
 
 impl Default for Engine<()> {

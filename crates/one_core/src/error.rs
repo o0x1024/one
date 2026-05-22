@@ -9,6 +9,7 @@ pub enum OneError {
     StackOverflow { depth: usize },
     ExecutionTimeout { elapsed_ms: u64 },
     InternalError(String),
+    TypeError(String),
     Blocked { operation: String, reason: String },
 }
 
@@ -89,6 +90,7 @@ impl fmt::Display for OneError {
                 write!(f, "execution timeout after {elapsed_ms}ms")
             }
             Self::InternalError(msg) => write!(f, "internal error: {msg}"),
+            Self::TypeError(msg) => write!(f, "type error: {msg}"),
             Self::Blocked { operation, reason } => {
                 write!(f, "blocked: {operation} — {reason}")
             }
