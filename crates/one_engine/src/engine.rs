@@ -1376,4 +1376,58 @@ mod tests {
         assert!(result.is_string());
         assert_eq!(engine.vm().value_to_string(result), "ab");
     }
+
+    #[test]
+    fn global_parse_int() {
+        let result = run(r#"return parseInt("42");"#);
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn global_parse_int_hex() {
+        let result = run(r#"return parseInt("0xff", 16);"#);
+        assert!(result.to_number() == 255.0);
+    }
+
+    #[test]
+    fn global_parse_float() {
+        let result = run(r#"return parseFloat("3.14");"#);
+        assert!((result.to_number() - 3.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn global_is_nan() {
+        let result = run("return isNaN(0 / 0);");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn global_is_finite() {
+        let result = run("return isFinite(42);");
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn global_is_finite_infinity() {
+        let result = run("return isFinite(1 / 0);");
+        assert_eq!(result.as_bool(), Some(false));
+    }
+
+    #[test]
+    fn encode_uri_component() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"return encodeURIComponent("hello world");"#)
+            .unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "hello%20world");
+    }
+
+    #[test]
+    fn decode_uri_component() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(r#"return decodeURIComponent("hello%20world");"#)
+            .unwrap();
+        assert_eq!(engine.vm().value_to_string(result), "hello world");
+    }
 }

@@ -1,7 +1,7 @@
 use one_core::JsValue;
 use one_vm::Vm;
 
-fn parse_int_string(s: &str, radix: i32) -> f64 {
+pub(crate) fn parse_int_string(s: &str, radix: i32) -> f64 {
     let trimmed = s.trim_start();
     if trimmed.is_empty() {
         return f64::NAN;
@@ -52,6 +52,67 @@ fn parse_int_string(s: &str, radix: i32) -> f64 {
     } else {
         f64::NAN
     }
+}
+
+pub(crate) fn parse_float_string(s: &str) -> f64 {
+    let trimmed = s.trim_start();
+    if trimmed.is_empty() {
+        return f64::NAN;
+    }
+
+    if trimmed.starts_with("Infinity") || trimmed.starts_with("+Infinity") {
+        return f64::INFINITY;
+    }
+    if trimmed.starts_with("-Infinity") {
+        return f64::NEG_INFINITY;
+    }
+    if trimmed.starts_with("NaN")
+        || trimmed.starts_with("+NaN")
+        || trimmed.starts_with("-NaN")
+    {
+        return f64::NAN;
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut end = 0;
+    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+        end += 1;
+    }
+
+    let mut saw_digit = false;
+    while end < bytes.len() && bytes[end].is_ascii_digit() {
+        saw_digit = true;
+        end += 1;
+    }
+
+    if end < bytes.len() && bytes[end] == b'.' {
+        end += 1;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            saw_digit = true;
+            end += 1;
+        }
+    }
+
+    if !saw_digit {
+        return f64::NAN;
+    }
+
+    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+        let exp_start = end;
+        end += 1;
+        if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
+            end += 1;
+        }
+        let digit_start = end;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == digit_start {
+            end = exp_start;
+        }
+    }
+
+    trimmed[..end].parse::<f64>().unwrap_or(f64::NAN)
 }
 
 fn number_to_string(n: f64, radix: i32) -> String {
@@ -142,9 +203,7 @@ pub fn install_number(vm: &mut Vm) {
             .first()
             .map(|v| vm.value_to_string(*v))
             .unwrap_or_default();
-        let trimmed = s.trim_start();
-        let parsed: f64 = trimmed.parse().unwrap_or(f64::NAN);
-        Ok(JsValue::from_f64(parsed))
+        Ok(JsValue::from_f64(parse_float_string(&s)))
     });
 
     vm.register_host_fn("Number.prototype.toFixed", |vm, args| {
