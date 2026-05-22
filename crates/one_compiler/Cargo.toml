@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 one_core.workspace = true
+one_parser.workspace = true

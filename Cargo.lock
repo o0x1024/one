@@ -11,6 +11,7 @@ name = "one_compiler"
 version = "0.1.0"
 dependencies = [
  "one_core",
+ "one_parser",
 ]
 
 [[package]]

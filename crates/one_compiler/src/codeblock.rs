@@ -1,14 +1,22 @@
-use one_core::JsValue;
-
 use crate::opcode::Instruction;
+
+/// A value stored in the bytecode constant pool.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Constant {
+    Number(f64),
+    Integer(i32),
+    String(String),
+    Boolean(bool),
+    Null,
+    Undefined,
+}
 
 /// Compiled function/script bytecode
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
     pub name: String,
     pub bytecode: Vec<Instruction>,
-    pub constants: Vec<JsValue>,
-    pub string_constants: Vec<String>, // separate pool for string values
+    pub constants: Vec<Constant>,
     pub register_count: u16,
     pub param_count: u16,
     pub upvalue_count: u16,
@@ -42,7 +50,6 @@ impl CodeBlock {
             name,
             bytecode: Vec::new(),
             constants: Vec::new(),
-            string_constants: Vec::new(),
             register_count: 0,
             param_count: 0,
             upvalue_count: 0,
@@ -61,19 +68,12 @@ impl CodeBlock {
         offset
     }
 
-    pub fn add_constant(&mut self, value: JsValue) -> u16 {
-        let idx = self.constants.len();
-        self.constants.push(value);
-        idx as u16
-    }
-
-    pub fn add_string_constant(&mut self, s: String) -> u16 {
-        // Dedup strings
-        if let Some(idx) = self.string_constants.iter().position(|existing| existing == &s) {
+    pub fn add_constant(&mut self, value: Constant) -> u16 {
+        if let Some(idx) = self.constants.iter().position(|c| c == &value) {
             return idx as u16;
         }
-        let idx = self.string_constants.len();
-        self.string_constants.push(s);
+        let idx = self.constants.len();
+        self.constants.push(value);
         idx as u16
     }
 
@@ -95,7 +95,6 @@ impl CodeBlock {
 mod tests {
     use super::*;
     use crate::opcode::{Instruction, Opcode};
-    use one_core::JsValue;
 
     #[test]
     fn emit_and_read_back() {
@@ -112,8 +111,8 @@ mod tests {
     #[test]
     fn constant_pool() {
         let mut cb = CodeBlock::new("test".into());
-        let idx0 = cb.add_constant(JsValue::from_f64(3.14));
-        let idx1 = cb.add_constant(JsValue::from_i32(42));
+        let idx0 = cb.add_constant(Constant::Number(3.14));
+        let idx1 = cb.add_constant(Constant::Integer(42));
         assert_eq!(idx0, 0);
         assert_eq!(idx1, 1);
         assert_eq!(cb.constants.len(), 2);
@@ -122,13 +121,13 @@ mod tests {
     #[test]
     fn string_constant_dedup() {
         let mut cb = CodeBlock::new("test".into());
-        let a = cb.add_string_constant("hello".into());
-        let b = cb.add_string_constant("world".into());
-        let c = cb.add_string_constant("hello".into());
+        let a = cb.add_constant(Constant::String("hello".into()));
+        let b = cb.add_constant(Constant::String("world".into()));
+        let c = cb.add_constant(Constant::String("hello".into()));
         assert_eq!(a, 0);
         assert_eq!(b, 1);
         assert_eq!(c, 0); // deduped
-        assert_eq!(cb.string_constants.len(), 2);
+        assert_eq!(cb.constants.len(), 2);
     }
 
     #[test]

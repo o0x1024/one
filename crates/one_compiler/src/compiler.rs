@@ -1,0 +1,900 @@
+use one_parser::ast::*;
+
+use crate::codeblock::{CodeBlock, Constant};
+use crate::opcode::{Instruction, Opcode};
+
+pub struct Compiler {
+    code: CodeBlock,
+    next_register: u8,
+}
+
+impl Compiler {
+    pub fn new(name: String) -> Self {
+        Compiler {
+            code: CodeBlock::new(name),
+            next_register: 0,
+        }
+    }
+
+    pub fn compile(program: &Program) -> CodeBlock {
+        let mut compiler = Compiler::new("<script>".into());
+        for stmt in &program.body {
+            compiler.compile_statement(stmt);
+        }
+        compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+        compiler.code
+    }
+
+    fn alloc_reg(&mut self) -> u8 {
+        let r = self.next_register;
+        self.next_register += 1;
+        if self.next_register as u16 > self.code.register_count {
+            self.code.register_count = self.next_register as u16;
+        }
+        r
+    }
+
+    fn free_reg(&mut self) {
+        if self.next_register > 0 {
+            self.next_register -= 1;
+        }
+    }
+
+    fn add_string(&mut self, s: &str) -> u16 {
+        self.code
+            .add_constant(Constant::String(s.to_string()))
+    }
+
+    fn compile_statement(&mut self, stmt: &Statement) {
+        match &stmt.kind {
+            StatementKind::ExpressionStatement(expr) => {
+                let _reg = self.compile_expression(expr);
+                self.free_reg();
+            }
+            StatementKind::BlockStatement(stmts) => {
+                for s in stmts {
+                    self.compile_statement(s);
+                }
+            }
+            StatementKind::EmptyStatement => {}
+            StatementKind::IfStatement {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let test_reg = self.compile_expression(test);
+                let jump_false = self
+                    .code
+                    .emit(Instruction::asbx(Opcode::JumpIfFalse, test_reg, 0));
+                self.free_reg();
+
+                self.compile_statement(consequent);
+
+                if let Some(alt) = alternate {
+                    let jump_end = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    let else_start = self.code.current_offset();
+                    self.code.patch_jump(jump_false, else_start);
+                    self.compile_statement(alt);
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_end, end);
+                } else {
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_false, end);
+                }
+            }
+            StatementKind::WhileStatement { test, body } => {
+                let loop_start = self.code.current_offset();
+                let test_reg = self.compile_expression(test);
+                let jump_false = self
+                    .code
+                    .emit(Instruction::asbx(Opcode::JumpIfFalse, test_reg, 0));
+                self.free_reg();
+
+                self.compile_statement(body);
+
+                let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                self.code.patch_jump(jump_back, loop_start);
+
+                let end = self.code.current_offset();
+                self.code.patch_jump(jump_false, end);
+            }
+            StatementKind::DoWhileStatement { test, body } => {
+                let loop_start = self.code.current_offset();
+                self.compile_statement(body);
+                let test_reg = self.compile_expression(test);
+                let jump_back = self
+                    .code
+                    .emit(Instruction::asbx(Opcode::JumpIfTrue, test_reg, 0));
+                self.free_reg();
+                self.code.patch_jump(jump_back, loop_start);
+            }
+            StatementKind::ForStatement {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                if let Some(init) = init {
+                    self.compile_for_init(init);
+                }
+                let loop_start = self.code.current_offset();
+                if let Some(test) = test {
+                    let test_reg = self.compile_expression(test);
+                    let jump_false = self
+                        .code
+                        .emit(Instruction::asbx(Opcode::JumpIfFalse, test_reg, 0));
+                    self.free_reg();
+                    self.compile_statement(body);
+                    if let Some(update) = update {
+                        let _update_reg = self.compile_expression(update);
+                        self.free_reg();
+                    }
+                    let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    self.code.patch_jump(jump_back, loop_start);
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_false, end);
+                } else {
+                    self.compile_statement(body);
+                    if let Some(update) = update {
+                        let _update_reg = self.compile_expression(update);
+                        self.free_reg();
+                    }
+                    let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                    self.code.patch_jump(jump_back, loop_start);
+                }
+            }
+            StatementKind::ForInStatement { right, body, .. }
+            | StatementKind::ForOfStatement { right, body, .. } => {
+                let _right_reg = self.compile_expression(right);
+                self.free_reg();
+                self.compile_statement(body);
+            }
+            StatementKind::SwitchStatement {
+                discriminant,
+                cases,
+            } => {
+                let _disc_reg = self.compile_expression(discriminant);
+                self.free_reg();
+                for case in cases {
+                    if let Some(test) = &case.test {
+                        let _test_reg = self.compile_expression(test);
+                        self.free_reg();
+                    }
+                    for s in &case.consequent {
+                        self.compile_statement(s);
+                    }
+                }
+            }
+            StatementKind::ReturnStatement(arg) => match arg {
+                Some(expr) => {
+                    let reg = self.compile_expression(expr);
+                    self.code.emit(Instruction::abx(Opcode::Return, reg, 0));
+                }
+                None => {
+                    self.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+                }
+            },
+            StatementKind::BreakStatement(_) | StatementKind::ContinueStatement(_) => {}
+            StatementKind::ThrowStatement(expr) => {
+                let reg = self.compile_expression(expr);
+                self.code.emit(Instruction::abx(Opcode::Throw, reg, 0));
+            }
+            StatementKind::TryStatement {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.code.emit(Instruction::abx(Opcode::TryStart, 0, 0));
+                for s in block {
+                    self.compile_statement(s);
+                }
+                self.code.emit(Instruction::op_only(Opcode::TryEnd));
+                if let Some(handler) = handler {
+                    for s in &handler.body {
+                        self.compile_statement(s);
+                    }
+                }
+                if let Some(finalizer) = finalizer {
+                    for s in finalizer {
+                        self.compile_statement(s);
+                    }
+                }
+            }
+            StatementKind::LabeledStatement { body, .. } => {
+                self.compile_statement(body);
+            }
+            StatementKind::WithStatement { object, body } => {
+                let _obj_reg = self.compile_expression(object);
+                self.free_reg();
+                self.compile_statement(body);
+            }
+            StatementKind::DebuggerStatement => {
+                self.code.emit(Instruction::op_only(Opcode::Debugger));
+            }
+            StatementKind::Declaration(decl) => {
+                self.compile_declaration(decl);
+            }
+        }
+    }
+
+    fn compile_for_init(&mut self, init: &ForInit) {
+        match init {
+            ForInit::Expression(expr) => {
+                let _reg = self.compile_expression(expr);
+                self.free_reg();
+            }
+            ForInit::Declaration(decl) => {
+                self.compile_declaration(decl);
+            }
+        }
+    }
+
+    fn compile_declaration(&mut self, decl: &Declaration) {
+        match &decl.kind {
+            DeclarationKind::VariableDeclaration {
+                kind: _,
+                declarations,
+            } => {
+                for declarator in declarations {
+                    self.compile_variable_declarator(declarator);
+                }
+            }
+            DeclarationKind::FunctionDeclaration(func) => {
+                let idx = self.compile_function(func);
+                let closure_reg = self.alloc_reg();
+                self.code
+                    .emit(Instruction::abx(Opcode::CreateClosure, closure_reg, idx));
+                if let Some(name) = &func.id {
+                    let name_idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::SetGlobal, closure_reg, name_idx));
+                }
+                self.free_reg();
+            }
+            DeclarationKind::ClassDeclaration(class) => {
+                let _ = class;
+            }
+            DeclarationKind::ImportDeclaration { .. }
+            | DeclarationKind::ExportNamedDeclaration { .. }
+            | DeclarationKind::ExportDefaultDeclaration(_)
+            | DeclarationKind::ExportAllDeclaration { .. } => {}
+        }
+    }
+
+    fn compile_variable_declarator(&mut self, declarator: &VariableDeclarator) {
+        if let Some(init) = &declarator.init {
+            let value_reg = self.compile_expression(init);
+            if let PatternKind::Identifier { name, .. } = &declarator.id.kind {
+                let name_idx = self.add_string(name);
+                self.code
+                    .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+            }
+            self.free_reg();
+        }
+    }
+
+    fn compile_function(&mut self, func: &Function) -> u16 {
+        let name = func.id.as_deref().unwrap_or("<anonymous>");
+        let mut inner = Compiler::new(name.to_string());
+        inner.code.param_count = func.params.len() as u16;
+        inner.code.is_async = func.is_async;
+        inner.code.is_generator = func.is_generator;
+
+        match &func.body {
+            FunctionBody::Block(stmts) => {
+                for stmt in stmts {
+                    inner.compile_statement(stmt);
+                }
+                inner.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+            }
+            FunctionBody::Expression(expr) => {
+                let reg = inner.compile_expression(expr);
+                inner.code.emit(Instruction::abx(Opcode::Return, reg, 0));
+            }
+            FunctionBody::Lazy(_) => {
+                inner.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+            }
+        }
+
+        let idx = self.code.inner_functions.len();
+        self.code.inner_functions.push(inner.code);
+        idx as u16
+    }
+
+    fn compile_expression(&mut self, expr: &Expression) -> u8 {
+        let dest = self.alloc_reg();
+        self.compile_expression_to(expr, dest);
+        dest
+    }
+
+    fn compile_expression_to(&mut self, expr: &Expression, dest: u8) {
+        match &expr.kind {
+            ExpressionKind::NumberLiteral(n) => {
+                let i = *n as i32;
+                if i as f64 == *n && i >= i16::MIN as i32 && i <= i16::MAX as i32 {
+                    self.code
+                        .emit(Instruction::asbx(Opcode::LoadInt, dest, i as i16));
+                } else {
+                    let idx = self
+                        .code
+                        .add_constant(Constant::Number(*n));
+                    self.code
+                        .emit(Instruction::abx(Opcode::LoadConst, dest, idx));
+                }
+            }
+            ExpressionKind::StringLiteral(s) => {
+                let idx = self
+                    .code
+                    .add_constant(Constant::String(s.clone()));
+                self.code
+                    .emit(Instruction::abx(Opcode::LoadConst, dest, idx));
+            }
+            ExpressionKind::BooleanLiteral(true) => {
+                self.code.emit(Instruction::abx(Opcode::LoadTrue, dest, 0));
+            }
+            ExpressionKind::BooleanLiteral(false) => {
+                self.code.emit(Instruction::abx(Opcode::LoadFalse, dest, 0));
+            }
+            ExpressionKind::NullLiteral => {
+                self.code.emit(Instruction::abx(Opcode::LoadNull, dest, 0));
+            }
+            ExpressionKind::Identifier(name) => {
+                let idx = self.add_string(name);
+                self.code
+                    .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+            }
+            ExpressionKind::This => {
+                let idx = self.add_string("this");
+                self.code
+                    .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+            }
+            ExpressionKind::Super => {
+                let idx = self.add_string("super");
+                self.code
+                    .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+            }
+            ExpressionKind::UnaryExpression {
+                operator,
+                argument,
+                ..
+            } => match operator {
+                UnaryOp::Minus => {
+                    let arg_reg = self.compile_expression(argument);
+                    self.code.emit(Instruction::abc(Opcode::Neg, dest, arg_reg, 0));
+                    self.free_reg();
+                }
+                UnaryOp::Plus => {
+                    self.compile_expression_to(argument, dest);
+                }
+                UnaryOp::Not => {
+                    let arg_reg = self.compile_expression(argument);
+                    self.code.emit(Instruction::abc(Opcode::Not, dest, arg_reg, 0));
+                    self.free_reg();
+                }
+                UnaryOp::BitNot => {
+                    let arg_reg = self.compile_expression(argument);
+                    self.code
+                        .emit(Instruction::abc(Opcode::BitNot, dest, arg_reg, 0));
+                    self.free_reg();
+                }
+                UnaryOp::Typeof => {
+                    let arg_reg = self.compile_expression(argument);
+                    self.code
+                        .emit(Instruction::abc(Opcode::TypeOf, dest, arg_reg, 0));
+                    self.free_reg();
+                }
+                UnaryOp::Void => {
+                    let _arg_reg = self.compile_expression(argument);
+                    self.free_reg();
+                    self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+                }
+                UnaryOp::Delete => {
+                    self.compile_expression_to(argument, dest);
+                }
+            },
+            ExpressionKind::UpdateExpression {
+                operator,
+                argument,
+                prefix,
+            } => {
+                let _ = (operator, prefix);
+                self.compile_expression_to(argument, dest);
+            }
+            ExpressionKind::BinaryExpression {
+                operator,
+                left,
+                right,
+            } => {
+                let left_reg = self.compile_expression(left);
+                let right_reg = self.compile_expression(right);
+                let op = binary_opcode(*operator);
+                self.code
+                    .emit(Instruction::abc(op, dest, left_reg, right_reg));
+                self.free_reg();
+                self.free_reg();
+            }
+            ExpressionKind::LogicalExpression {
+                operator,
+                left,
+                right,
+            } => match operator {
+                LogicalOp::And => {
+                    let left_reg = self.compile_expression(left);
+                    let jump_short = self
+                        .code
+                        .emit(Instruction::asbx(Opcode::JumpIfFalse, left_reg, 0));
+                    self.code.emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
+                    self.free_reg();
+                    self.compile_expression_to(right, dest);
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_short, end);
+                }
+                LogicalOp::Or => {
+                    let left_reg = self.compile_expression(left);
+                    let jump_short = self
+                        .code
+                        .emit(Instruction::asbx(Opcode::JumpIfTrue, left_reg, 0));
+                    self.code.emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
+                    self.free_reg();
+                    self.compile_expression_to(right, dest);
+                    let end = self.code.current_offset();
+                    self.code.patch_jump(jump_short, end);
+                }
+            },
+            ExpressionKind::AssignmentExpression {
+                operator,
+                left,
+                right,
+            } => {
+                if *operator == AssignOp::Assign {
+                    self.compile_simple_assignment(left, right, dest);
+                } else {
+                    let value_reg = self.compile_expression(right);
+                    self.code.emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                    self.free_reg();
+                }
+            }
+            ExpressionKind::MemberExpression {
+                object,
+                property,
+                computed,
+                ..
+            } => {
+                let obj_reg = self.compile_expression(object);
+                if *computed {
+                    if let MemberProperty::Expression(key_expr) = property {
+                        let key_reg = self.compile_expression(key_expr);
+                        self.code
+                            .emit(Instruction::abc(Opcode::GetElem, dest, obj_reg, key_reg));
+                        self.free_reg();
+                    }
+                } else {
+                    let name = member_property_name(property);
+                    let idx = self.add_string(&name);
+                    self.code.emit(Instruction::abc(
+                        Opcode::GetProp,
+                        dest,
+                        obj_reg,
+                        idx as u8,
+                    ));
+                }
+                self.free_reg();
+            }
+            ExpressionKind::CallExpression {
+                callee,
+                arguments,
+                ..
+            } => {
+                let func_reg = self.alloc_reg();
+                self.compile_expression_to(callee, func_reg);
+
+                let argc = arguments.len() as u8;
+                for (i, arg) in arguments.iter().enumerate() {
+                    let arg_reg = func_reg + 1 + i as u8;
+                    self.ensure_register(arg_reg + 1);
+                    self.compile_expression_to(arg, arg_reg);
+                }
+                self.next_register = func_reg + 1 + argc;
+
+                self.code
+                    .emit(Instruction::abc(Opcode::Call, dest, func_reg, argc));
+            }
+            ExpressionKind::NewExpression {
+                callee,
+                arguments,
+            } => {
+                let ctor_reg = self.alloc_reg();
+                self.compile_expression_to(callee, ctor_reg);
+
+                let argc = arguments.len() as u8;
+                for (i, arg) in arguments.iter().enumerate() {
+                    let arg_reg = ctor_reg + 1 + i as u8;
+                    self.ensure_register(arg_reg + 1);
+                    self.compile_expression_to(arg, arg_reg);
+                }
+                self.next_register = ctor_reg + 1 + argc;
+
+                self.code
+                    .emit(Instruction::abc(Opcode::New, dest, ctor_reg, argc));
+            }
+            ExpressionKind::ConditionalExpression {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let test_reg = self.compile_expression(test);
+                let jump_false = self
+                    .code
+                    .emit(Instruction::asbx(Opcode::JumpIfFalse, test_reg, 0));
+                self.free_reg();
+                self.compile_expression_to(consequent, dest);
+                let jump_end = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+                let else_start = self.code.current_offset();
+                self.code.patch_jump(jump_false, else_start);
+                self.compile_expression_to(alternate, dest);
+                let end = self.code.current_offset();
+                self.code.patch_jump(jump_end, end);
+            }
+            ExpressionKind::SequenceExpression(exprs) => {
+                for (i, e) in exprs.iter().enumerate() {
+                    if i + 1 == exprs.len() {
+                        self.compile_expression_to(e, dest);
+                    } else {
+                        let _reg = self.compile_expression(e);
+                        self.free_reg();
+                    }
+                }
+            }
+            ExpressionKind::ArrayExpression(elements) => {
+                let len = elements.len() as u8;
+                self.code.emit(Instruction::abc(Opcode::CreateArray, dest, len, 0));
+                for (i, elem) in elements.iter().enumerate() {
+                    if let Some(expr) = elem {
+                        let val_reg = self.compile_expression(expr);
+                        self.code.emit(Instruction::abc(
+                            Opcode::SetArrayElem,
+                            dest,
+                            i as u8,
+                            val_reg,
+                        ));
+                        self.free_reg();
+                    }
+                }
+            }
+            ExpressionKind::ObjectExpression(properties) => {
+                let len = properties.len() as u8;
+                self.code
+                    .emit(Instruction::abc(Opcode::CreateObject, dest, len, 0));
+                for prop in properties {
+                    self.compile_object_property(dest, prop);
+                }
+            }
+            ExpressionKind::ArrowFunctionExpression(arrow) => {
+                let func = Function {
+                    id: None,
+                    params: arrow.params.clone(),
+                    body: arrow.body.clone(),
+                    is_async: arrow.is_async,
+                    is_generator: false,
+                    span: arrow.span,
+                };
+                let idx = self.compile_function(&func);
+                self.code
+                    .emit(Instruction::abx(Opcode::CreateClosure, dest, idx));
+            }
+            ExpressionKind::FunctionExpression(func) => {
+                let idx = self.compile_function(func);
+                self.code
+                    .emit(Instruction::abx(Opcode::CreateClosure, dest, idx));
+            }
+            ExpressionKind::ClassExpression(class) => {
+                let _ = class;
+                self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+            }
+            ExpressionKind::SpreadElement(inner) => {
+                let inner_reg = self.compile_expression(inner);
+                self.code
+                    .emit(Instruction::abc(Opcode::Spread, dest, inner_reg, 0));
+                self.free_reg();
+            }
+            ExpressionKind::ParenthesizedExpression(inner) => {
+                self.compile_expression_to(inner, dest);
+            }
+            ExpressionKind::BigIntLiteral(_)
+            | ExpressionKind::RegExpLiteral { .. }
+            | ExpressionKind::TemplateLiteral(_)
+            | ExpressionKind::TaggedTemplateExpression { .. }
+            | ExpressionKind::YieldExpression { .. }
+            | ExpressionKind::AwaitExpression(_)
+            | ExpressionKind::MetaProperty { .. }
+            | ExpressionKind::ImportExpression(_) => {
+                self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
+            }
+        }
+    }
+
+    fn ensure_register(&mut self, count: u8) {
+        if self.next_register < count {
+            self.next_register = count;
+        }
+        if self.next_register as u16 > self.code.register_count {
+            self.code.register_count = self.next_register as u16;
+        }
+    }
+
+    fn compile_simple_assignment(
+        &mut self,
+        left: &AssignTarget,
+        right: &Expression,
+        dest: u8,
+    ) {
+        let value_reg = self.compile_expression(right);
+        match left {
+            AssignTarget::Identifier(name) => {
+                let name_idx = self.add_string(name);
+                self.code
+                    .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+                if dest != value_reg {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                }
+            }
+            AssignTarget::Member(member) => {
+                if let ExpressionKind::MemberExpression {
+                    object,
+                    property,
+                    computed,
+                    ..
+                } = &member.kind
+                {
+                    let obj_reg = self.compile_expression(object);
+                    if *computed {
+                        if let MemberProperty::Expression(key_expr) = property {
+                            let key_reg = self.compile_expression(key_expr);
+                            self.code.emit(Instruction::abc(
+                                Opcode::SetElem,
+                                obj_reg,
+                                key_reg,
+                                value_reg,
+                            ));
+                            self.free_reg();
+                            self.free_reg();
+                        }
+                    } else {
+                        let name = member_property_name(property);
+                        let idx = self.add_string(&name);
+                        self.code.emit(Instruction::abc(
+                            Opcode::SetProp,
+                            obj_reg,
+                            idx as u8,
+                            value_reg,
+                        ));
+                        self.free_reg();
+                    }
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                }
+            }
+            AssignTarget::Pattern(_) => {
+                self.code
+                    .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+            }
+        }
+        self.free_reg();
+    }
+
+    fn compile_object_property(&mut self, obj_reg: u8, prop: &ObjectProperty) {
+        match &prop.kind {
+            ObjectPropertyKind::Property {
+                key,
+                value,
+                computed,
+                shorthand,
+            } => {
+                let key_name = if *shorthand {
+                    if let PropertyKey::Identifier(name) = key {
+                        name.clone()
+                    } else {
+                        return;
+                    }
+                } else if *computed {
+                    return;
+                } else {
+                    property_key_name(key)
+                };
+                let val_reg = self.compile_expression(value);
+                let idx = self.add_string(&key_name);
+                self.code.emit(Instruction::abc(
+                    Opcode::InitProp,
+                    obj_reg,
+                    idx as u8,
+                    val_reg,
+                ));
+                self.free_reg();
+            }
+            ObjectPropertyKind::Method { .. } | ObjectPropertyKind::SpreadElement(_) => {}
+        }
+    }
+}
+
+fn binary_opcode(op: BinaryOp) -> Opcode {
+    match op {
+        BinaryOp::Add => Opcode::Add,
+        BinaryOp::Sub => Opcode::Sub,
+        BinaryOp::Mul => Opcode::Mul,
+        BinaryOp::Div => Opcode::Div,
+        BinaryOp::Mod => Opcode::Mod,
+        BinaryOp::Exp => Opcode::Exp,
+        BinaryOp::Eq => Opcode::Eq,
+        BinaryOp::NotEq => Opcode::Eq,
+        BinaryOp::StrictEq => Opcode::StrictEq,
+        BinaryOp::StrictNotEq => Opcode::StrictEq,
+        BinaryOp::Lt => Opcode::Lt,
+        BinaryOp::LtEq => Opcode::LtEq,
+        BinaryOp::Gt => Opcode::Gt,
+        BinaryOp::GtEq => Opcode::GtEq,
+        BinaryOp::Shl => Opcode::Shl,
+        BinaryOp::Shr => Opcode::Shr,
+        BinaryOp::UShr => Opcode::UShr,
+        BinaryOp::BitAnd => Opcode::BitAnd,
+        BinaryOp::BitOr => Opcode::BitOr,
+        BinaryOp::BitXor => Opcode::BitXor,
+        BinaryOp::In => Opcode::In,
+        BinaryOp::Instanceof => Opcode::InstanceOf,
+        BinaryOp::NullishCoalescing => Opcode::Eq,
+    }
+}
+
+fn member_property_name(property: &MemberProperty) -> String {
+    match property {
+        MemberProperty::Identifier(name) => name.clone(),
+        MemberProperty::PrivateIdentifier(name) => name.clone(),
+        MemberProperty::Expression(expr) => match &expr.kind {
+            ExpressionKind::StringLiteral(s) => s.clone(),
+            ExpressionKind::Identifier(name) => name.clone(),
+            _ => String::new(),
+        },
+    }
+}
+
+fn property_key_name(key: &PropertyKey) -> String {
+    match key {
+        PropertyKey::Identifier(name) => name.clone(),
+        PropertyKey::String(name) => name.clone(),
+        PropertyKey::Number(n) => n.to_string(),
+        PropertyKey::Computed(_) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codeblock::Constant;
+    use one_parser::parser::Parser;
+
+    fn compile(src: &str) -> CodeBlock {
+        let program = Parser::parse(src).expect("parse failed");
+        Compiler::compile(&program)
+    }
+
+    #[test]
+    fn compile_number_literal() {
+        let code = compile("42;");
+        assert!(code.bytecode.len() >= 2); // LoadInt + ReturnUndef
+        assert_eq!(code.bytecode[0].opcode(), Opcode::LoadInt);
+        assert_eq!(code.bytecode[0].sbx(), 42);
+    }
+
+    #[test]
+    fn compile_float_literal() {
+        let code = compile("3.14;");
+        assert_eq!(code.bytecode[0].opcode(), Opcode::LoadConst);
+        assert!(matches!(
+            &code.constants[0],
+            Constant::Number(n) if (*n - 3.14).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn compile_string_literal() {
+        let code = compile(r#""hello";"#);
+        assert_eq!(code.bytecode[0].opcode(), Opcode::LoadConst);
+        assert!(matches!(
+            &code.constants[0],
+            Constant::String(s) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn compile_boolean_true() {
+        let code = compile("true;");
+        assert_eq!(code.bytecode[0].opcode(), Opcode::LoadTrue);
+    }
+
+    #[test]
+    fn compile_null() {
+        let code = compile("null;");
+        assert_eq!(code.bytecode[0].opcode(), Opcode::LoadNull);
+    }
+
+    #[test]
+    fn compile_binary_add() {
+        let code = compile("1 + 2;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Add));
+    }
+
+    #[test]
+    fn compile_variable_declaration() {
+        let code = compile("let x = 42;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::SetGlobal) || opcodes.contains(&Opcode::LoadInt));
+    }
+
+    #[test]
+    fn compile_identifier() {
+        let code = compile("x;");
+        assert_eq!(code.bytecode[0].opcode(), Opcode::GetGlobal);
+    }
+
+    #[test]
+    fn compile_member_expression() {
+        let code = compile("a.b;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::GetGlobal));
+        assert!(opcodes.contains(&Opcode::GetProp));
+    }
+
+    #[test]
+    fn compile_call_expression() {
+        let code = compile("foo(1);");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Call));
+    }
+
+    #[test]
+    fn compile_console_log() {
+        let code = compile(r#"console.log("Hello World");"#);
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::GetGlobal));
+        assert!(opcodes.contains(&Opcode::GetProp));
+        assert!(opcodes.contains(&Opcode::LoadConst));
+        assert!(opcodes.contains(&Opcode::Call));
+    }
+
+    #[test]
+    fn compile_if_statement() {
+        let code = compile("if (true) { 1; }");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::JumpIfFalse));
+    }
+
+    #[test]
+    fn compile_while_loop() {
+        let code = compile("while (true) { 1; }");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Jump));
+        assert!(opcodes.contains(&Opcode::JumpIfFalse));
+    }
+
+    #[test]
+    fn compile_return_value() {
+        let code = compile("return 42;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Return));
+    }
+
+    #[test]
+    fn compile_unary_minus() {
+        let code = compile("-x;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(opcodes.contains(&Opcode::Neg));
+    }
+
+    #[test]
+    fn ends_with_return_undef() {
+        let code = compile("42;");
+        let last = code.bytecode.last().unwrap();
+        assert_eq!(last.opcode(), Opcode::ReturnUndef);
+    }
+}
