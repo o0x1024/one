@@ -40,6 +40,25 @@ impl<'a> Lexer<'a> {
         self.pos
     }
 
+    pub fn set_position(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
+    pub fn peek_kind(&self) -> Option<TokenKind> {
+        let mut peek_lexer = Lexer {
+            source: self.source,
+            pos: self.pos,
+            line: self.line,
+            col: self.col,
+        };
+        let kind = peek_lexer.next_token().kind;
+        if matches!(kind, TokenKind::Eof) {
+            None
+        } else {
+            Some(kind)
+        }
+    }
+
     pub fn scan_template_part(&mut self) -> TokenKind {
         self.scan_template_part_inner()
     }

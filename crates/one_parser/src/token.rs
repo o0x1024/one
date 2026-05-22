@@ -87,6 +87,9 @@ pub enum TokenKind {
     Declare,
     Abstract,
     Readonly,
+    Public,
+    Private,
+    Protected,
     Namespace,
     Module,
     Keyof,
@@ -211,6 +214,9 @@ impl TokenKind {
                 | TokenKind::Declare
                 | TokenKind::Abstract
                 | TokenKind::Readonly
+                | TokenKind::Public
+                | TokenKind::Private
+                | TokenKind::Protected
                 | TokenKind::Namespace
                 | TokenKind::Module
                 | TokenKind::Keyof
@@ -312,6 +318,9 @@ pub fn lookup_keyword(word: &str) -> Option<TokenKind> {
         "declare" => Some(TokenKind::Declare),
         "abstract" => Some(TokenKind::Abstract),
         "readonly" => Some(TokenKind::Readonly),
+        "public" => Some(TokenKind::Public),
+        "private" => Some(TokenKind::Private),
+        "protected" => Some(TokenKind::Protected),
         "namespace" => Some(TokenKind::Namespace),
         "module" => Some(TokenKind::Module),
         "keyof" => Some(TokenKind::Keyof),

@@ -60,6 +60,13 @@ impl Parser<'_> {
                     span: self.span_from(start),
                 })
             }
+            TokenKind::Interface if self.is_typescript() => self.skip_interface_declaration(),
+            TokenKind::Type if self.is_typescript() => self.skip_type_alias_declaration(),
+            TokenKind::Enum if self.is_typescript() => self.parse_enum_declaration_statement(),
+            TokenKind::Namespace | TokenKind::Module if self.is_typescript() => {
+                self.skip_namespace_declaration()
+            }
+            TokenKind::Declare if self.is_typescript() => self.skip_declare_declaration(),
             TokenKind::If => self.parse_if_statement(),
             TokenKind::While => self.parse_while_statement(),
             TokenKind::Do => self.parse_do_while_statement(),
@@ -450,6 +457,7 @@ impl Parser<'_> {
         let is_async = self.eat(&TokenKind::Async);
         self.expect(&TokenKind::Function)?;
         let id = Some(self.parse_identifier_name()?);
+        self.skip_generic_params();
         let func = self.parse_function_after_name(id, is_async, false, start)?;
         Ok(Declaration {
             kind: DeclarationKind::FunctionDeclaration(func),
@@ -461,6 +469,7 @@ impl Parser<'_> {
         let start = self.current.span.start;
         self.expect(&TokenKind::Class)?;
         let id = Some(self.parse_identifier_name()?);
+        self.skip_generic_params();
         let class = self.parse_class_tail(id, start)?;
         Ok(Declaration {
             kind: DeclarationKind::ClassDeclaration(class),
@@ -495,6 +504,7 @@ impl Parser<'_> {
     fn parse_class_member(&mut self) -> ParseResult<ClassMember> {
         let start = self.current.span.start;
         let is_static = self.eat(&TokenKind::Static);
+        self.skip_access_modifiers();
         let key = self.parse_property_key()?;
         let computed = matches!(key, PropertyKey::Computed(_));
 
@@ -512,6 +522,7 @@ impl Parser<'_> {
             });
         }
 
+        self.skip_type_annotation();
         let value = if self.eat(&TokenKind::Assign) {
             Some(self.parse_assignment_expression()?)
         } else {
@@ -532,7 +543,19 @@ impl Parser<'_> {
     pub(super) fn parse_function_params(&mut self) -> ParseResult<Vec<Pattern>> {
         let mut params = Vec::new();
         while !self.at(&TokenKind::RParen) && !self.at_eof() {
-            params.push(self.parse_pattern()?);
+            let mut param = self.parse_pattern()?;
+            if self.eat(&TokenKind::Assign) {
+                let default = self.parse_assignment_expression()?;
+                let span = param.span;
+                param = Pattern {
+                    kind: PatternKind::AssignmentPattern {
+                        left: Box::new(param),
+                        right: Box::new(default),
+                    },
+                    span,
+                };
+            }
+            params.push(param);
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -542,17 +565,19 @@ impl Parser<'_> {
 
     pub(super) fn parse_pattern(&mut self) -> ParseResult<Pattern> {
         let start = self.current.span.start;
-        match &self.current.kind {
+        let pattern = match &self.current.kind {
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
-                Ok(Pattern {
+                self.skip_ts_postfix_modifiers();
+                self.skip_type_annotation();
+                Pattern {
                     kind: PatternKind::Identifier {
                         name,
                         type_annotation: None,
                     },
                     span: self.span_from(start),
-                })
+                }
             }
             TokenKind::LBracket => {
                 self.advance();
@@ -577,10 +602,10 @@ impl Parser<'_> {
                     }
                 }
                 self.expect(&TokenKind::RBracket)?;
-                Ok(Pattern {
+                Pattern {
                     kind: PatternKind::ArrayPattern { elements, rest },
                     span: self.span_from(start),
-                })
+                }
             }
             TokenKind::LBrace => {
                 self.advance();
@@ -593,6 +618,7 @@ impl Parser<'_> {
                         break;
                     }
                     let prop_start = self.current.span.start;
+                    self.skip_access_modifiers();
                     let key = self.parse_property_key()?;
                     if self.eat(&TokenKind::Colon) {
                         let computed = matches!(&key, PropertyKey::Computed(_));
@@ -627,12 +653,14 @@ impl Parser<'_> {
                     }
                 }
                 self.expect(&TokenKind::RBrace)?;
-                Ok(Pattern {
+                Pattern {
                     kind: PatternKind::ObjectPattern { properties, rest },
                     span: self.span_from(start),
-                })
+                }
             }
-            _ => Err(self.error("expected pattern")),
-        }
+            _ => return Err(self.error("expected pattern")),
+        };
+        self.skip_type_annotation();
+        Ok(pattern)
     }
 }

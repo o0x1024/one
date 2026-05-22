@@ -2,6 +2,7 @@ mod expr;
 mod module;
 mod prescan;
 mod stmt;
+mod typescript;
 
 use crate::ast::*;
 use crate::lexer::Lexer;
@@ -20,7 +21,7 @@ impl Default for ParserConfig {
     fn default() -> Self {
         ParserConfig {
             lazy: false,
-            typescript: false,
+            typescript: true,
             jsx: false,
             source_type: SourceType::Script,
         }
@@ -32,9 +33,16 @@ pub struct Parser<'a> {
     pub(super) current: Token,
     pub(super) previous_end: BytePos,
     lazy: bool,
+    typescript: bool,
     #[allow(dead_code)]
     source: &'a str,
     source_type: SourceType,
+}
+
+pub(super) struct ParserCheckpoint {
+    pos: usize,
+    current: Token,
+    previous_end: BytePos,
 }
 
 #[derive(Debug)]
@@ -59,6 +67,7 @@ impl<'a> Parser<'a> {
             current,
             previous_end,
             lazy: config.lazy,
+            typescript: config.typescript,
             source,
             source_type: config.source_type,
         }
@@ -229,6 +238,20 @@ impl<'a> Parser<'a> {
             stmts.push(self.parse_statement()?);
         }
         Ok(stmts)
+    }
+
+    pub(super) fn checkpoint(&self) -> ParserCheckpoint {
+        ParserCheckpoint {
+            pos: self.lexer.position(),
+            current: self.current.clone(),
+            previous_end: self.previous_end,
+        }
+    }
+
+    pub(super) fn restore(&mut self, cp: ParserCheckpoint) {
+        self.lexer.set_position(cp.pos);
+        self.current = cp.current;
+        self.previous_end = cp.previous_end;
     }
 }
 
@@ -786,5 +809,95 @@ mod tests {
             },
             _ => panic!("expected declaration statement"),
         }
+    }
+
+    #[test]
+    fn ts_type_annotation() {
+        let program = Parser::parse("let x: number = 42;").unwrap();
+        assert!(!program.body.is_empty());
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::VariableDeclaration { declarations, .. } => {
+                    assert!(declarations[0].init.is_some());
+                }
+                _ => panic!("expected variable declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn ts_function_types() {
+        let program = Parser::parse(
+            "function add(a: number, b: number): number { return a + b; }",
+        )
+        .unwrap();
+        assert!(!program.body.is_empty());
+    }
+
+    #[test]
+    fn ts_interface_skip() {
+        let program = Parser::parse("interface Foo { x: number; y: string; }").unwrap();
+        assert_eq!(program.body.len(), 1);
+        assert!(matches!(
+            program.body[0].kind,
+            StatementKind::EmptyStatement
+        ));
+    }
+
+    #[test]
+    fn ts_type_alias_skip() {
+        let program = Parser::parse("type MyType = string | number;").unwrap();
+        assert_eq!(program.body.len(), 1);
+        assert!(matches!(
+            program.body[0].kind,
+            StatementKind::EmptyStatement
+        ));
+    }
+
+    #[test]
+    fn ts_generic_function() {
+        let program =
+            Parser::parse("function identity<T>(x: T): T { return x; }").unwrap();
+        assert!(!program.body.is_empty());
+    }
+
+    #[test]
+    fn ts_optional_param() {
+        let program = Parser::parse("function f(x?: number) { return x; }").unwrap();
+        assert!(!program.body.is_empty());
+    }
+
+    #[test]
+    fn ts_as_expression() {
+        let program = Parser::parse("let x = 42 as number;").unwrap();
+        assert!(!program.body.is_empty());
+    }
+
+    #[test]
+    fn ts_enum_declaration() {
+        let program = Parser::parse("enum Color { Red, Green, Blue }").unwrap();
+        assert_eq!(program.body.len(), 1);
+        match &program.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::VariableDeclaration {
+                    kind: VarKind::Const,
+                    declarations,
+                } => {
+                    assert_eq!(declarations.len(), 1);
+                    assert!(declarations[0].init.is_some());
+                }
+                _ => panic!("expected const declaration"),
+            },
+            _ => panic!("expected declaration"),
+        }
+    }
+
+    #[test]
+    fn ts_module_mode() {
+        let program =
+            Parser::parse_module("interface Foo { x: number; } export let x: number = 1;")
+                .unwrap();
+        assert_eq!(program.body.len(), 2);
     }
 }

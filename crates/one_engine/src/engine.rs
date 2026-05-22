@@ -1430,4 +1430,40 @@ mod tests {
             .unwrap();
         assert_eq!(engine.vm().value_to_string(result), "hello world");
     }
+
+    #[test]
+    fn ts_type_annotated_execution() {
+        let result = run("let x: number = 42; return x;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn ts_function_typed_execution() {
+        let result = run(
+            "function add(a: number, b: number): number { return a + b; } return add(3, 4);",
+        );
+        assert!(result.to_number() == 7.0);
+    }
+
+    #[test]
+    fn ts_generic_execution() {
+        let result = run(
+            "function identity<T>(x: T): T { return x; } return identity(42);",
+        );
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn ts_interface_execution() {
+        let result = run(
+            "interface Point { x: number; y: number; } let p = {x: 1, y: 2}; return p.x + p.y;",
+        );
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn ts_enum_execution() {
+        let result = run("enum Color { Red, Green, Blue } return Color.Green;");
+        assert!(result.to_number() == 1.0);
+    }
 }

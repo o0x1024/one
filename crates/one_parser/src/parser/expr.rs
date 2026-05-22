@@ -42,6 +42,7 @@ impl Parser<'_> {
     fn parse_conditional_expression(&mut self) -> ParseResult<Expression> {
         let start = self.current.span.start;
         let test = self.parse_binary_expression(0)?;
+        let test = self.parse_ts_as_or_satisfies(test);
         if self.eat(&TokenKind::QuestionMark) {
             let consequent = self.parse_assignment_expression()?;
             self.expect(&TokenKind::Colon)?;
@@ -84,8 +85,11 @@ impl Parser<'_> {
         Ok(left)
     }
 
-    fn parse_unary_expression(&mut self) -> ParseResult<Expression> {
+    pub(super) fn parse_unary_expression(&mut self) -> ParseResult<Expression> {
         let start = self.current.span.start;
+        if self.is_type_assertion_start() {
+            return self.parse_type_assertion(start);
+        }
         match &self.current.kind {
             TokenKind::Minus => {
                 self.advance();
@@ -325,6 +329,12 @@ impl Parser<'_> {
                         },
                         span: self.span_from(start),
                     };
+                }
+                TokenKind::Not
+                    if self.is_typescript()
+                        && !matches!(self.lexer.peek_kind(), Some(TokenKind::Eq)) =>
+                {
+                    self.advance();
                 }
                 _ => break,
             }
@@ -633,6 +643,7 @@ impl Parser<'_> {
         } else {
             None
         };
+        self.skip_generic_params();
         let func = self.parse_function_after_name(id, is_async, false, start)?;
         Ok(Expression {
             kind: ExpressionKind::FunctionExpression(func),
@@ -655,10 +666,24 @@ impl Parser<'_> {
 
         if self.at(&TokenKind::RParen) {
             self.advance();
+            self.skip_type_annotation();
             if self.eat(&TokenKind::Arrow) {
                 return self.finish_arrow_function(vec![], false, start);
             }
             return Err(self.error("expected expression"));
+        }
+
+        if self.is_typescript() {
+            let checkpoint = self.checkpoint();
+            if let Ok(params) = self.try_parse_arrow_params()
+                && self.eat(&TokenKind::RParen)
+            {
+                self.skip_type_annotation();
+                if self.eat(&TokenKind::Arrow) {
+                    return self.finish_arrow_function(params, false, start);
+                }
+            }
+            self.restore(checkpoint);
         }
 
         let expr = self.parse_expression()?;
@@ -668,6 +693,22 @@ impl Parser<'_> {
             return self.finish_arrow_function(params, false, start);
         }
         Ok(expr)
+    }
+
+    fn try_parse_arrow_params(&mut self) -> ParseResult<Vec<Pattern>> {
+        let mut params = vec![self.parse_pattern()?];
+        loop {
+            if self.at(&TokenKind::RParen) {
+                return Ok(params);
+            }
+            if !self.eat(&TokenKind::Comma) {
+                return Err(self.error("expected ',' or ')' in arrow parameter list"));
+            }
+            if self.at(&TokenKind::RParen) {
+                return Ok(params);
+            }
+            params.push(self.parse_pattern()?);
+        }
     }
 
     fn finish_arrow_function(
@@ -777,6 +818,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_function_params()?;
         self.expect(&TokenKind::RParen)?;
+        self.skip_type_annotation();
         let body = self.parse_function_block_body()?;
         Ok(Function {
             id,
