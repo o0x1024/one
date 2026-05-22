@@ -32,6 +32,15 @@ struct MicroTask {
     arg: JsValue,
 }
 
+struct TimerEntry {
+    id: u32,
+    callback: JsValue,
+    delay_ms: u64,
+    scheduled_at: std::time::Instant,
+    interval: bool,
+    cancelled: bool,
+}
+
 #[derive(Clone)]
 enum PromiseMethodKind {
     Then,
@@ -54,6 +63,8 @@ pub struct Vm {
     exception_stack: Vec<ExceptionHandlerFrame>,
     current_exception: Option<JsValue>,
     microtasks: Vec<MicroTask>,
+    timers: Vec<TimerEntry>,
+    next_timer_id: u32,
     promise_methods: Vec<(JsValue, PromiseMethodKind)>,
     promise_resolvers: Vec<(JsValue, PromiseResolverKind)>,
     array_prototype: Option<JsValue>,
@@ -78,6 +89,8 @@ impl Vm {
             exception_stack: Vec::new(),
             current_exception: None,
             microtasks: Vec::new(),
+            timers: Vec::new(),
+            next_timer_id: 0,
             promise_methods: Vec::new(),
             promise_resolvers: Vec::new(),
             array_prototype: None,
@@ -344,8 +357,81 @@ impl Vm {
         Self::promise_resolver_sentinel(idx)
     }
 
-    fn schedule_microtask(&mut self, callback: JsValue, arg: JsValue) {
+    pub fn schedule_microtask(&mut self, callback: JsValue, arg: JsValue) {
         self.microtasks.push(MicroTask { callback, arg });
+    }
+
+    pub fn schedule_timer(&mut self, callback: JsValue, delay_ms: u64, interval: bool) -> u32 {
+        let id = self.next_timer_id;
+        self.next_timer_id += 1;
+        self.timers.push(TimerEntry {
+            id,
+            callback,
+            delay_ms,
+            scheduled_at: std::time::Instant::now(),
+            interval,
+            cancelled: false,
+        });
+        id
+    }
+
+    pub fn cancel_timer(&mut self, id: u32) {
+        for timer in &mut self.timers {
+            if timer.id == id {
+                timer.cancelled = true;
+            }
+        }
+    }
+
+    pub fn has_pending_tasks(&self) -> bool {
+        !self.microtasks.is_empty() || self.timers.iter().any(|t| !t.cancelled)
+    }
+
+    pub fn run_event_loop(&mut self) -> OneResult<()> {
+        loop {
+            self.drain_microtasks()?;
+
+            let now = std::time::Instant::now();
+            let ready_idx = self
+                .timers
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    !t.cancelled
+                        && now.duration_since(t.scheduled_at).as_millis() as u64 >= t.delay_ms
+                })
+                .min_by_key(|(_, t)| {
+                    t.scheduled_at + std::time::Duration::from_millis(t.delay_ms)
+                })
+                .map(|(idx, _)| idx);
+
+            if let Some(idx) = ready_idx {
+                let callback = self.timers[idx].callback;
+                let is_interval = self.timers[idx].interval;
+
+                if is_interval {
+                    self.timers[idx].scheduled_at = now;
+                } else {
+                    self.timers[idx].cancelled = true;
+                }
+
+                self.call_function(callback, &[])?;
+                self.drain_microtasks()?;
+
+                if is_interval && !self.timers[idx].cancelled {
+                    continue;
+                }
+            }
+
+            self.timers.retain(|t| !t.cancelled);
+
+            if self.timers.is_empty() && self.microtasks.is_empty() {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(())
     }
 
     fn invoke_callback(&mut self, callback: JsValue, arg: JsValue) -> OneResult<()> {

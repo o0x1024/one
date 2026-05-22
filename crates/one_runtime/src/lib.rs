@@ -13,6 +13,7 @@ pub mod promise;
 pub mod regexp;
 pub mod string;
 pub mod symbol;
+pub mod timers;
 
 use one_vm::Vm;
 
@@ -20,6 +21,7 @@ use one_vm::Vm;
 pub fn install_builtins(vm: &mut Vm) {
     console::install_console(vm);
     promise::install_promise(vm);
+    timers::install_timers(vm);
     globals::install_globals(vm);
     object::install_object(vm);
     array::install_array(vm);

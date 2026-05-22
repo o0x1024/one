@@ -31,6 +31,16 @@ impl Engine {
             .insert(name.to_string(), source.to_string());
     }
 
+    pub fn run_event_loop(&mut self) -> OneResult<()> {
+        self.vm.run_event_loop()
+    }
+
+    pub fn eval_async(&mut self, source: &str) -> OneResult<JsValue> {
+        let result = self.eval(source)?;
+        self.run_event_loop()?;
+        Ok(result)
+    }
+
     /// Execute JavaScript source code
     pub fn eval(&mut self, source: &str) -> OneResult<JsValue> {
         let program = Parser::parse(source).map_err(|e| {
@@ -1268,5 +1278,102 @@ mod tests {
     fn nullish_coalescing_empty_string() {
         let result = run(r#"let x = ""; return x ?? "default";"#);
         assert!(result.is_string());
+    }
+
+    #[test]
+    fn set_timeout_basic() {
+        let mut engine = Engine::new();
+        engine
+            .eval("result = 0; setTimeout(function() { result = 42; }, 0);")
+            .unwrap();
+        engine.run_event_loop().unwrap();
+        let result = engine.vm().get_global("result");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn set_timeout_delay() {
+        let mut engine = Engine::new();
+        engine
+            .eval("result = 0; setTimeout(function() { result = 1; }, 10);")
+            .unwrap();
+        engine.run_event_loop().unwrap();
+        let result = engine.vm().get_global("result");
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn clear_timeout() {
+        let mut engine = Engine::new();
+        engine
+            .eval(
+                r#"
+                result = 0;
+                let id = setTimeout(function() { result = 99; }, 0);
+                clearTimeout(id);
+            "#,
+            )
+            .unwrap();
+        engine.run_event_loop().unwrap();
+        let result = engine.vm().get_global("result");
+        assert!(result.to_number() == 0.0);
+    }
+
+    #[test]
+    fn set_interval_basic() {
+        let mut engine = Engine::new();
+        engine
+            .eval(
+                r#"
+                count = 0;
+                let id = setInterval(function() {
+                    count = count + 1;
+                    if (count >= 3) { clearInterval(id); }
+                }, 5);
+            "#,
+            )
+            .unwrap();
+        engine.run_event_loop().unwrap();
+        let result = engine.vm().get_global("count");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn queue_microtask_basic() {
+        let mut engine = Engine::new();
+        engine
+            .eval(
+                r#"
+                result = [];
+                result.push(1);
+                queueMicrotask(function() { result.push(3); });
+                result.push(2);
+            "#,
+            )
+            .unwrap();
+        let result = engine.vm().get_global("result");
+        if let Some(obj) = engine.vm().get_object(result) {
+            if let one_vm::object::ObjectKind::Array { length } = obj.kind() {
+                assert_eq!(*length, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_ordering() {
+        let mut engine = Engine::new();
+        engine
+            .eval(
+                r#"
+                order = "";
+                setTimeout(function() { order = order + "b"; }, 10);
+                setTimeout(function() { order = order + "a"; }, 0);
+            "#,
+            )
+            .unwrap();
+        engine.run_event_loop().unwrap();
+        let result = engine.vm().get_global("order");
+        assert!(result.is_string());
+        assert_eq!(engine.vm().value_to_string(result), "ab");
     }
 }
