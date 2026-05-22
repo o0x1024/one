@@ -174,6 +174,21 @@ impl<'a> Parser<'a> {
         matches!(self.current.kind, TokenKind::Identifier(_))
     }
 
+    pub(super) fn parse_property_name(&mut self) -> ParseResult<String> {
+        match &self.current.kind {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(name)
+            }
+            TokenKind::Catch => {
+                self.advance();
+                Ok("catch".to_string())
+            }
+            _ => Err(self.error("expected identifier")),
+        }
+    }
+
     pub(super) fn parse_identifier_name(&mut self) -> ParseResult<String> {
         match &self.current.kind {
             TokenKind::Identifier(name) => {

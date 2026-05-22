@@ -231,7 +231,7 @@ impl Parser<'_> {
                 TokenKind::Dot => {
                     let start = expr.span.start;
                     self.advance();
-                    let property = self.parse_identifier_name()?;
+                    let property = self.parse_property_name()?;
                     expr = Expression {
                         kind: ExpressionKind::MemberExpression {
                             object: Box::new(expr),
@@ -259,7 +259,7 @@ impl Parser<'_> {
                             span: self.span_from(start),
                         };
                     } else {
-                        let property = self.parse_identifier_name()?;
+                        let property = self.parse_property_name()?;
                         expr = Expression {
                             kind: ExpressionKind::MemberExpression {
                                 object: Box::new(expr),

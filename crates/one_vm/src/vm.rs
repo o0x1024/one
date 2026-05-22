@@ -4,9 +4,11 @@ use one_compiler::{CodeBlock, Constant, Opcode};
 use one_core::{JsValue, OneError, OneResult};
 use one_gc::Heap;
 
-use crate::object::{FunctionObject, JsObject, ObjectKind};
+use crate::object::{FunctionObject, JsObject, ObjectKind, PromiseState};
 
 const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
+const PROMISE_METHOD_MASK: u64 = 0xBEEF_0000;
+const PROMISE_RESOLVER_MASK: u64 = 0xCAFE_0000;
 
 struct CallFrame {
     code: *const CodeBlock,
@@ -25,6 +27,23 @@ struct ExceptionHandlerFrame {
 /// Native function callable from JS
 pub type HostFunction = Box<dyn Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue>>;
 
+struct MicroTask {
+    callback: JsValue,
+    arg: JsValue,
+}
+
+#[derive(Clone)]
+enum PromiseMethodKind {
+    Then,
+    Catch,
+}
+
+#[derive(Clone)]
+enum PromiseResolverKind {
+    Resolve,
+    Reject,
+}
+
 pub struct Vm {
     stack: Vec<JsValue>,
     frames: Vec<CallFrame>,
@@ -34,6 +53,9 @@ pub struct Vm {
     host_functions: Vec<(String, HostFunction)>,
     exception_stack: Vec<ExceptionHandlerFrame>,
     current_exception: Option<JsValue>,
+    microtasks: Vec<MicroTask>,
+    promise_methods: Vec<(JsValue, PromiseMethodKind)>,
+    promise_resolvers: Vec<(JsValue, PromiseResolverKind)>,
 }
 
 impl Vm {
@@ -47,6 +69,9 @@ impl Vm {
             host_functions: Vec::new(),
             exception_stack: Vec::new(),
             current_exception: None,
+            microtasks: Vec::new(),
+            promise_methods: Vec::new(),
+            promise_resolvers: Vec::new(),
         }
     }
 
@@ -91,6 +116,278 @@ impl Vm {
         None
     }
 
+    fn promise_method_idx(val: JsValue) -> Option<usize> {
+        if val.is_object() {
+            let raw = val.as_object_raw()?;
+            if raw & 0xFFFF_0000 == PROMISE_METHOD_MASK {
+                return Some((raw & 0xFFFF) as usize);
+            }
+        }
+        None
+    }
+
+    fn promise_method_sentinel(idx: usize) -> JsValue {
+        JsValue::from_object_raw(PROMISE_METHOD_MASK | idx as u64)
+    }
+
+    fn promise_resolver_idx(val: JsValue) -> Option<usize> {
+        if val.is_object() {
+            let raw = val.as_object_raw()?;
+            if raw & 0xFFFF_0000 == PROMISE_RESOLVER_MASK {
+                return Some((raw & 0xFFFF) as usize);
+            }
+        }
+        None
+    }
+
+    fn promise_resolver_sentinel(idx: usize) -> JsValue {
+        JsValue::from_object_raw(PROMISE_RESOLVER_MASK | idx as u64)
+    }
+
+    fn find_host_fn(&self, name: &str) -> Option<usize> {
+        self.host_functions
+            .iter()
+            .position(|(n, _)| n == name)
+    }
+
+    fn invoke_host_fn(&mut self, idx: usize, args: &[JsValue]) -> OneResult<JsValue> {
+        if idx >= self.host_functions.len() {
+            return Err(OneError::InternalError(format!(
+                "unknown host fn index: {idx}"
+            )));
+        }
+
+        let placeholder: HostFunction = Box::new(|_, _| Ok(JsValue::undefined()));
+        let host_fn = std::mem::replace(&mut self.host_functions[idx].1, placeholder);
+        let result = host_fn(self, args)?;
+        self.host_functions[idx].1 = host_fn;
+        Ok(result)
+    }
+
+    pub fn alloc_promise(&mut self, state: PromiseState) -> JsValue {
+        let obj = JsObject::with_kind(ObjectKind::Promise(state));
+        let promise_val = self.alloc_object(obj);
+
+        let then_idx = self.promise_methods.len();
+        self.promise_methods
+            .push((promise_val, PromiseMethodKind::Then));
+        let catch_idx = self.promise_methods.len();
+        self.promise_methods
+            .push((promise_val, PromiseMethodKind::Catch));
+
+        if let Some(obj) = self.get_object_mut(promise_val) {
+            obj.set_property(
+                "then".to_string(),
+                Self::promise_method_sentinel(then_idx),
+            );
+            obj.set_property(
+                "catch".to_string(),
+                Self::promise_method_sentinel(catch_idx),
+            );
+        }
+
+        promise_val
+    }
+
+    pub fn create_promise_resolver(&mut self, promise_val: JsValue, resolve: bool) -> JsValue {
+        let idx = self.promise_resolvers.len();
+        let kind = if resolve {
+            PromiseResolverKind::Resolve
+        } else {
+            PromiseResolverKind::Reject
+        };
+        self.promise_resolvers.push((promise_val, kind));
+        Self::promise_resolver_sentinel(idx)
+    }
+
+    fn schedule_microtask(&mut self, callback: JsValue, arg: JsValue) {
+        self.microtasks.push(MicroTask { callback, arg });
+    }
+
+    fn invoke_callback(&mut self, callback: JsValue, arg: JsValue) -> OneResult<()> {
+        if callback.is_undefined() || callback.is_null() {
+            return Ok(());
+        }
+        self.call_function(callback, &[arg])?;
+        Ok(())
+    }
+
+    fn settle_promise_fulfilled(&mut self, promise_val: JsValue, value: JsValue) -> OneResult<()> {
+        let pending = if let Some(obj) = self.get_object_mut(promise_val) {
+            if let ObjectKind::Promise(PromiseState::Pending { .. }) = obj.kind() {
+                if let ObjectKind::Promise(state) = obj.kind_mut() {
+                    if let PromiseState::Pending {
+                        on_fulfilled,
+                        on_rejected: _,
+                    } = std::mem::replace(state, PromiseState::Fulfilled(value))
+                    {
+                        Some(on_fulfilled)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(handlers) = pending {
+            for callback in handlers {
+                self.schedule_microtask(callback, value);
+            }
+        }
+        Ok(())
+    }
+
+    fn settle_promise_rejected(&mut self, promise_val: JsValue, reason: JsValue) -> OneResult<()> {
+        let pending = if let Some(obj) = self.get_object_mut(promise_val) {
+            if let ObjectKind::Promise(PromiseState::Pending { .. }) = obj.kind() {
+                if let ObjectKind::Promise(state) = obj.kind_mut() {
+                    if let PromiseState::Pending {
+                        on_fulfilled: _,
+                        on_rejected,
+                    } = std::mem::replace(state, PromiseState::Rejected(reason))
+                    {
+                        Some(on_rejected)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(handlers) = pending {
+            for callback in handlers {
+                self.schedule_microtask(callback, reason);
+            }
+        }
+        Ok(())
+    }
+
+    fn promise_then(
+        &mut self,
+        promise_val: JsValue,
+        on_fulfilled: JsValue,
+        on_rejected: JsValue,
+    ) -> OneResult<JsValue> {
+        if let Some(obj) = self.get_object(promise_val) {
+            match obj.kind() {
+                ObjectKind::Promise(PromiseState::Fulfilled(value)) => {
+                    let value = *value;
+                    self.invoke_callback(on_fulfilled, value)?;
+                }
+                ObjectKind::Promise(PromiseState::Rejected(reason)) => {
+                    let reason = *reason;
+                    self.invoke_callback(on_rejected, reason)?;
+                }
+                ObjectKind::Promise(PromiseState::Pending { .. }) => {
+                    if let Some(obj) = self.get_object_mut(promise_val)
+                        && let ObjectKind::Promise(PromiseState::Pending {
+                            on_fulfilled: fulfilled_handlers,
+                            on_rejected: rejected_handlers,
+                        }) = obj.kind_mut()
+                    {
+                        if !on_fulfilled.is_undefined() {
+                            fulfilled_handlers.push(on_fulfilled);
+                        }
+                        if !on_rejected.is_undefined() {
+                            rejected_handlers.push(on_rejected);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(promise_val)
+    }
+
+    fn promise_catch(&mut self, promise_val: JsValue, on_rejected: JsValue) -> OneResult<JsValue> {
+        self.promise_then(promise_val, JsValue::undefined(), on_rejected)
+    }
+
+    fn drain_microtasks(&mut self) -> OneResult<()> {
+        while !self.microtasks.is_empty() {
+            let tasks: Vec<MicroTask> = std::mem::take(&mut self.microtasks);
+            for task in tasks {
+                self.call_function(task.callback, &[task.arg])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn call_function(&mut self, func_val: JsValue, args: &[JsValue]) -> OneResult<JsValue> {
+        if let Some(idx) = Self::host_sentinel_idx(func_val) {
+            return self.invoke_host_fn(idx, args);
+        }
+
+        if let Some(idx) = Self::promise_resolver_idx(func_val) {
+            if idx < self.promise_resolvers.len() {
+                let (promise_val, kind) = self.promise_resolvers[idx].clone();
+                let arg = args.first().copied().unwrap_or(JsValue::undefined());
+                match kind {
+                    PromiseResolverKind::Resolve => {
+                        self.settle_promise_fulfilled(promise_val, arg)?;
+                    }
+                    PromiseResolverKind::Reject => {
+                        self.settle_promise_rejected(promise_val, arg)?;
+                    }
+                }
+            }
+            return Ok(JsValue::undefined());
+        }
+
+        if let Some(idx) = Self::promise_method_idx(func_val) {
+            if idx < self.promise_methods.len() {
+                let (promise_val, method) = &self.promise_methods[idx].clone();
+                let on_fulfilled = args.first().copied().unwrap_or(JsValue::undefined());
+                let on_rejected = args.get(1).copied().unwrap_or(JsValue::undefined());
+                return match method {
+                    PromiseMethodKind::Then => {
+                        self.promise_then(*promise_val, on_fulfilled, on_rejected)
+                    }
+                    PromiseMethodKind::Catch => self.promise_catch(*promise_val, on_fulfilled),
+                };
+            }
+            return Ok(JsValue::undefined());
+        }
+
+        if let Some(obj) = self.get_object(func_val)
+            && let ObjectKind::Function(func_obj) = obj.kind()
+        {
+            let code = &func_obj.code as *const CodeBlock;
+            let code_ref = unsafe { &*code };
+            let base = self.stack.len();
+            self.stack
+                .resize(base + code_ref.register_count as usize, JsValue::undefined());
+            for (i, &arg) in args.iter().enumerate() {
+                if i < code_ref.param_count as usize {
+                    self.stack[base + i] = arg;
+                }
+            }
+            let caller_depth = self.frames.len();
+            self.frames.push(CallFrame {
+                code,
+                pc: 0,
+                base,
+                dest: 0,
+                is_constructor: false,
+                this_val: JsValue::undefined(),
+            });
+            return self.run_until(Some(caller_depth));
+        }
+        Ok(JsValue::undefined())
+    }
+
     /// Allocate a JsObject on the heap and return a JsValue pointing to it
     pub fn alloc_object(&mut self, obj: JsObject) -> JsValue {
         let ptr = self.heap.alloc(obj);
@@ -101,7 +398,10 @@ impl Vm {
     pub fn get_object(&self, val: JsValue) -> Option<&JsObject> {
         if val.is_object() {
             let raw = val.as_object_raw()?;
-            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK {
+            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK
+                || raw & 0xFFFF_0000 == PROMISE_METHOD_MASK
+                || raw & 0xFFFF_0000 == PROMISE_RESOLVER_MASK
+            {
                 return None;
             }
             Some(unsafe { &*(raw as *const JsObject) })
@@ -114,7 +414,10 @@ impl Vm {
     pub fn get_object_mut(&mut self, val: JsValue) -> Option<&mut JsObject> {
         if val.is_object() {
             let raw = val.as_object_raw()?;
-            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK {
+            if raw & 0xFFFF_0000 == HOST_SENTINEL_MASK
+                || raw & 0xFFFF_0000 == PROMISE_METHOD_MASK
+                || raw & 0xFFFF_0000 == PROMISE_RESOLVER_MASK
+            {
                 return None;
             }
             Some(unsafe { &mut *(raw as *mut JsObject) })
@@ -141,10 +444,16 @@ impl Vm {
             this_val: JsValue::undefined(),
         });
 
-        self.run()
+        let result = self.run()?;
+        self.drain_microtasks()?;
+        Ok(result)
     }
 
     fn run(&mut self) -> OneResult<JsValue> {
+        self.run_until(None)
+    }
+
+    fn run_until(&mut self, stop_depth: Option<usize>) -> OneResult<JsValue> {
         loop {
             let frame_idx = self.frames.len() - 1;
             let code_ptr = self.frames[frame_idx].code;
@@ -323,6 +632,21 @@ impl Vm {
                     if let Some(obj) = self.get_object(obj_val) {
                         let value = obj.get_property(&name).unwrap_or(JsValue::undefined());
                         self.stack[base + dest as usize] = value;
+                    } else if let Some(idx) = Self::host_sentinel_idx(obj_val) {
+                        if idx < self.host_functions.len() {
+                            let base_name = &self.host_functions[idx].0;
+                            let method_name = format!("{base_name}.{name}");
+                            if let Some(method_idx) = self.find_host_fn(&method_name) {
+                                let sentinel = JsValue::from_object_raw(
+                                    HOST_SENTINEL_MASK | method_idx as u64,
+                                );
+                                self.stack[base + dest as usize] = sentinel;
+                            } else {
+                                self.stack[base + dest as usize] = JsValue::undefined();
+                            }
+                        } else {
+                            self.stack[base + dest as usize] = JsValue::undefined();
+                        }
                     } else {
                         self.stack[base + dest as usize] = JsValue::undefined();
                     }
@@ -461,23 +785,28 @@ impl Vm {
                     let func_val = self.stack[base + func_reg as usize];
 
                     if let Some(idx) = Self::host_sentinel_idx(func_val) {
-                        if idx >= self.host_functions.len() {
-                            return Err(OneError::InternalError(format!(
-                                "unknown host fn index: {idx}"
-                            )));
-                        }
-
                         let args: Vec<JsValue> = (0..argc)
                             .map(|i| self.stack[base + func_reg as usize + 1 + i])
                             .collect();
+                        let result = self.invoke_host_fn(idx, &args)?;
+                        self.stack[base + dest as usize] = result;
+                        continue;
+                    }
 
-                        let placeholder: HostFunction =
-                            Box::new(|_, _| Ok(JsValue::undefined()));
-                        let host_fn =
-                            std::mem::replace(&mut self.host_functions[idx].1, placeholder);
-                        let result = host_fn(self, &args)?;
-                        self.host_functions[idx].1 = host_fn;
+                    if Self::promise_resolver_idx(func_val).is_some() {
+                        let args: Vec<JsValue> = (0..argc)
+                            .map(|i| self.stack[base + func_reg as usize + 1 + i])
+                            .collect();
+                        let result = self.call_function(func_val, &args)?;
+                        self.stack[base + dest as usize] = result;
+                        continue;
+                    }
 
+                    if Self::promise_method_idx(func_val).is_some() {
+                        let args: Vec<JsValue> = (0..argc)
+                            .map(|i| self.stack[base + func_reg as usize + 1 + i])
+                            .collect();
+                        let result = self.call_function(func_val, &args)?;
                         self.stack[base + dest as usize] = result;
                         continue;
                     }
@@ -524,6 +853,15 @@ impl Vm {
                     let ctor_reg = instr.b();
                     let argc = instr.c() as usize;
                     let ctor_val = self.stack[base + ctor_reg as usize];
+
+                    if let Some(idx) = Self::host_sentinel_idx(ctor_val) {
+                        let args: Vec<JsValue> = (0..argc)
+                            .map(|i| self.stack[base + ctor_reg as usize + 1 + i])
+                            .collect();
+                        let result = self.invoke_host_fn(idx, &args)?;
+                        self.stack[base + dest as usize] = result;
+                        continue;
+                    }
 
                     let js_new = self.get_object(ctor_val).and_then(|obj| {
                         if let ObjectKind::Function(func_obj) = obj.kind() {
@@ -582,6 +920,9 @@ impl Vm {
                     if self.frames.is_empty() {
                         return Ok(return_val);
                     }
+                    if stop_depth == Some(self.frames.len()) {
+                        return Ok(return_val);
+                    }
                     let caller_base = self.frames.last().unwrap().base;
                     self.stack[caller_base + frame.dest as usize] = return_val;
                 }
@@ -594,6 +935,9 @@ impl Vm {
                         JsValue::undefined()
                     };
                     if self.frames.is_empty() {
+                        return Ok(return_val);
+                    }
+                    if stop_depth == Some(self.frames.len()) {
                         return Ok(return_val);
                     }
                     let caller_base = self.frames.last().unwrap().base;

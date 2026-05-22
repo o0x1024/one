@@ -121,4 +121,64 @@ mod tests {
         let result = engine.eval(r#"function greet(name) { console.log("Hello " + name); } greet("World");"#);
         assert!(result.is_ok());
     }
+
+    fn eval_promise(src: &str) -> JsValue {
+        let mut engine = Engine::new();
+        engine.eval(src).expect("execution failed")
+    }
+
+    #[test]
+    fn promise_resolve() {
+        let result = eval_promise(
+            r#"
+            result = 0;
+            let p = Promise.resolve(42);
+            p.then(function(v) { result = v; });
+            return result;
+        "#,
+        );
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn promise_reject_catch() {
+        let result = eval_promise(
+            r#"
+            result = 0;
+            let p = Promise.reject("error");
+            p.catch(function(e) { result = e; });
+            return result;
+        "#,
+        );
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn promise_then_chain() {
+        let result = eval_promise(
+            r#"
+            result = 0;
+            Promise.resolve(10).then(function(v) {
+                result = v * 2;
+            });
+            return result;
+        "#,
+        );
+        assert!(result.to_number() == 20.0);
+    }
+
+    #[test]
+    fn promise_constructor() {
+        let result = eval_promise(
+            r#"
+            result = 0;
+            let p = new Promise(function(resolve, reject) {
+                resolve(99);
+            });
+            p.then(function(v) { result = v; });
+            return result;
+        "#,
+        );
+        assert!(result.to_number() == 99.0);
+    }
 }

@@ -1,7 +1,7 @@
 pub mod object;
 pub mod vm;
 
-pub use object::{FunctionObject, JsObject, ObjectKind, Property};
+pub use object::{FunctionObject, JsObject, ObjectKind, PromiseState, Property};
 pub use vm::Vm;
 
 #[cfg(test)]

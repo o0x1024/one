@@ -28,6 +28,17 @@ pub enum ObjectKind {
     Array { length: u32 },
     Function(FunctionObject),
     HostObject { name: String },
+    Promise(PromiseState),
+}
+
+#[derive(Debug, Clone)]
+pub enum PromiseState {
+    Pending {
+        on_fulfilled: Vec<JsValue>,
+        on_rejected: Vec<JsValue>,
+    },
+    Fulfilled(JsValue),
+    Rejected(JsValue),
 }
 
 /// Represents a JS function with its compiled code and captured environment
