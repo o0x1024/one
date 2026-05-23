@@ -169,6 +169,32 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// True when a line terminator appears between the previous token and the current one.
+    pub(super) fn had_newline_before(&self) -> bool {
+        let start = self.previous_end as usize;
+        let end = self.current.span.start as usize;
+        if start >= end {
+            return false;
+        }
+        self.source[start..end]
+            .bytes()
+            .any(|b| b == b'\n' || b == b'\r')
+    }
+
+    /// Expect `;` or apply Automatic Semicolon Insertion.
+    pub(super) fn expect_semicolon(&mut self) -> ParseResult<()> {
+        if self.eat(&TokenKind::Semicolon) {
+            return Ok(());
+        }
+        if self.had_newline_before()
+            || self.at(&TokenKind::RBrace)
+            || self.at_eof()
+        {
+            return Ok(());
+        }
+        Err(self.error("expected ';'"))
+    }
+
     pub(super) fn advance(&mut self) -> Token {
         let prev = std::mem::replace(&mut self.current, self.lexer.next_token());
         self.previous_end = prev.span.end;
@@ -586,6 +612,30 @@ mod tests {
     fn parse_multiple_statements() {
         let prog = parse("let x = 1; let y = 2; x + y;");
         assert_eq!(prog.body.len(), 3);
+    }
+
+    #[test]
+    fn asi_no_semicolon_between_statements() {
+        let prog = parse("let x = 42\nreturn x");
+        assert_eq!(prog.body.len(), 2);
+    }
+
+    #[test]
+    fn asi_return_with_newline() {
+        let prog = parse("function f() { return\n42 }");
+        match &prog.body[0].kind {
+            StatementKind::Declaration(decl) => match &decl.kind {
+                DeclarationKind::FunctionDeclaration(func) => match &func.body {
+                    FunctionBody::Block(stmts) => match &stmts[0].kind {
+                        StatementKind::ReturnStatement(arg) => assert!(arg.is_none()),
+                        _ => panic!("expected return"),
+                    },
+                    _ => panic!("expected block body"),
+                },
+                _ => panic!("expected function"),
+            },
+            _ => panic!("expected declaration"),
+        }
     }
 
     #[test]

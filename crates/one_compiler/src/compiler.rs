@@ -213,10 +213,8 @@ impl Compiler {
                     self.code.patch_jump(jump_back, loop_start);
                 }
             }
-            StatementKind::ForInStatement { right, body, .. } => {
-                let _right_reg = self.compile_expression(right);
-                self.free_reg();
-                self.compile_statement(body);
+            StatementKind::ForInStatement { left, right, body, .. } => {
+                self.compile_for_in(left, right, body);
             }
             StatementKind::ForOfStatement { left, right, body, .. } => {
                 self.compile_for_of(left, right, body);
@@ -625,8 +623,45 @@ impl Compiler {
         }
     }
 
+    fn compile_for_in(&mut self, left: &ForInOfLeft, right: &Expression, body: &Statement) {
+        let obj_reg = self.compile_expression(right);
+
+        let func_reg = self.alloc_reg();
+        let arg_reg = func_reg + 1;
+        self.ensure_register(arg_reg + 1);
+
+        let object_reg = self.alloc_reg();
+        let object_idx = self.add_string("Object");
+        self.code
+            .emit(Instruction::abx(Opcode::GetGlobal, object_reg, object_idx));
+        let keys_idx = self.add_string("keys");
+        self.code.emit(Instruction::abc(
+            Opcode::GetProp,
+            func_reg,
+            object_reg,
+            keys_idx as u8,
+        ));
+        self.free_reg();
+
+        self.code
+            .emit(Instruction::abc(Opcode::Move, arg_reg, obj_reg, 0));
+        self.free_reg();
+
+        let keys_reg = self.alloc_reg();
+        self.next_register = arg_reg + 1;
+        self.code
+            .emit(Instruction::abc(Opcode::Call, keys_reg, func_reg, 1));
+
+        self.next_register = keys_reg + 1;
+        self.compile_for_of_iter(keys_reg, left, body);
+    }
+
     fn compile_for_of(&mut self, left: &ForInOfLeft, right: &Expression, body: &Statement) {
         let iter_reg = self.compile_expression(right);
+        self.compile_for_of_iter(iter_reg, left, body);
+    }
+
+    fn compile_for_of_iter(&mut self, iter_reg: u8, left: &ForInOfLeft, body: &Statement) {
 
         let idx_reg = self.alloc_reg();
         self.code.emit(Instruction::asbx(Opcode::LoadInt, idx_reg, 0));
@@ -949,10 +984,11 @@ impl Compiler {
             } => match operator {
                 LogicalOp::And => {
                     let left_reg = self.compile_expression(left);
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
                     let jump_short = self
                         .code
                         .emit(Instruction::asbx(Opcode::JumpIfFalse, left_reg, 0));
-                    self.code.emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
                     self.free_reg();
                     self.compile_expression_to(right, dest);
                     let end = self.code.current_offset();
@@ -960,10 +996,11 @@ impl Compiler {
                 }
                 LogicalOp::Or => {
                     let left_reg = self.compile_expression(left);
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
                     let jump_short = self
                         .code
                         .emit(Instruction::asbx(Opcode::JumpIfTrue, left_reg, 0));
-                    self.code.emit(Instruction::abc(Opcode::Move, dest, left_reg, 0));
                     self.free_reg();
                     self.compile_expression_to(right, dest);
                     let end = self.code.current_offset();

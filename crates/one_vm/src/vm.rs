@@ -954,6 +954,75 @@ impl Vm {
                     let c = self.stack[base + instr.c() as usize].to_number();
                     self.stack[base + instr.a() as usize] = JsValue::from_f64(b % c);
                 }
+                Opcode::Exp => {
+                    let b = self.stack[base + instr.b() as usize].to_number();
+                    let c = self.stack[base + instr.c() as usize].to_number();
+                    self.stack[base + instr.a() as usize] = JsValue::from_f64(b.powf(c));
+                }
+                Opcode::BitAnd => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    let c = Self::to_int32(self.stack[base + instr.c() as usize].to_number());
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_i32(b & c);
+                }
+                Opcode::BitOr => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    let c = Self::to_int32(self.stack[base + instr.c() as usize].to_number());
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_i32(b | c);
+                }
+                Opcode::BitXor => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    let c = Self::to_int32(self.stack[base + instr.c() as usize].to_number());
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_i32(b ^ c);
+                }
+                Opcode::Shl => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    let c = self.stack[base + instr.c() as usize].to_number();
+                    let shift = (c as u32) & 0x1f;
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_i32(b << shift);
+                }
+                Opcode::Shr => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    let c = self.stack[base + instr.c() as usize].to_number();
+                    let shift = (c as u32) & 0x1f;
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_i32(b >> shift);
+                }
+                Opcode::UShr => {
+                    let b = self.stack[base + instr.b() as usize].to_number();
+                    let c = self.stack[base + instr.c() as usize].to_number();
+                    let shift = (c as u32) & 0x1f;
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_f64((b as u32 >> shift) as f64);
+                }
+                Opcode::BitNot => {
+                    let b = Self::to_int32(self.stack[base + instr.b() as usize].to_number());
+                    self.stack[base + instr.a() as usize] = JsValue::from_i32(!b);
+                }
+                Opcode::Eq => {
+                    let b = self.stack[base + instr.b() as usize];
+                    let c = self.stack[base + instr.c() as usize];
+                    self.stack[base + instr.a() as usize] =
+                        JsValue::from_bool(self.loose_equal(b, c));
+                }
+                Opcode::InstanceOf => {
+                    let obj = self.stack[base + instr.b() as usize];
+                    let ctor = self.stack[base + instr.c() as usize];
+                    let result = self.js_instanceof(obj, ctor);
+                    self.stack[base + instr.a() as usize] = JsValue::from_bool(result);
+                }
+                Opcode::In => {
+                    let key_val = self.stack[base + instr.b() as usize];
+                    let obj_val = self.stack[base + instr.c() as usize];
+                    let key = self.value_to_string(key_val);
+                    let result = self
+                        .get_object(obj_val)
+                        .is_some_and(|obj| obj.has_own_property(&key));
+                    self.stack[base + instr.a() as usize] = JsValue::from_bool(result);
+                }
                 Opcode::Neg => {
                     let b = self.stack[base + instr.b() as usize].to_number();
                     self.stack[base + instr.a() as usize] = JsValue::from_f64(-b);
@@ -1558,6 +1627,67 @@ impl Vm {
         }
         if let ObjectKind::Array { length } = dest_obj.kind_mut() {
             *length = start + elements.len() as u32;
+        }
+    }
+
+    fn to_int32(n: f64) -> i32 {
+        if !n.is_finite() || n == 0.0 {
+            return 0;
+        }
+        let mut int = n.trunc().rem_euclid(2_f64.powi(32));
+        if int >= 2_f64.powi(31) {
+            int -= 2_f64.powi(32);
+        }
+        int as i32
+    }
+
+    fn loose_equal(&self, a: JsValue, b: JsValue) -> bool {
+        if a == b {
+            return true;
+        }
+        if a.is_number() && b.is_number() {
+            return a.to_number() == b.to_number();
+        }
+        if a.is_null() && b.is_undefined() || a.is_undefined() && b.is_null() {
+            return true;
+        }
+        if a.is_string() || b.is_string() {
+            return self.value_to_string(a) == self.value_to_string(b);
+        }
+        false
+    }
+
+    fn js_instanceof(&self, obj: JsValue, ctor: JsValue) -> bool {
+        let Some(ctor_obj) = self.get_object(ctor) else {
+            return false;
+        };
+        let proto_val = ctor_obj
+            .get_property("prototype")
+            .unwrap_or(JsValue::undefined());
+        if proto_val.is_null() || proto_val.is_undefined() {
+            return false;
+        }
+        let Some(target_raw) = proto_val.as_object_raw() else {
+            return false;
+        };
+        let target = target_raw as *mut JsObject;
+
+        let mut current = obj;
+        loop {
+            if current.is_null() || current.is_undefined() {
+                return false;
+            }
+            let Some(current_obj) = self.get_object(current) else {
+                return false;
+            };
+            if let Some(proto) = current_obj.prototype() {
+                if proto == target {
+                    return true;
+                }
+                current = JsValue::from_object_raw(proto as u64);
+            } else {
+                return false;
+            }
         }
     }
 

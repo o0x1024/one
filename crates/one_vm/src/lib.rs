@@ -15,10 +15,34 @@ mod tests {
     use one_core::JsValue;
     use one_parser::parser::Parser;
 
+    fn install_builtins(vm: &mut Vm) {
+        vm.register_host_fn("Object.keys", |vm, args| {
+            let obj_val = args.first().copied().unwrap_or(JsValue::undefined());
+            if let Some(obj) = vm.get_object(obj_val) {
+                let keys = obj.enumerable_keys();
+                let len = keys.len() as u32;
+                let string_vals: Vec<JsValue> = keys
+                    .iter()
+                    .map(|key| vm.alloc_string(key.clone()))
+                    .collect();
+                let arr_val = vm.new_array(len);
+                if let Some(arr_obj) = vm.get_object_mut(arr_val) {
+                    for (i, val) in string_vals.into_iter().enumerate() {
+                        arr_obj.set_property(i.to_string(), val);
+                    }
+                }
+                Ok(arr_val)
+            } else {
+                Ok(vm.new_array(0))
+            }
+        });
+    }
+
     fn run(src: &str) -> JsValue {
         let program = Parser::parse(src).expect("parse failed");
         let code = Compiler::compile(&program);
         let mut vm = Vm::new();
+        install_builtins(&mut vm);
         vm.execute(&code).expect("execution failed")
     }
 
@@ -507,6 +531,153 @@ mod tests {
     #[test]
     fn not_jump_fusion() {
         let result = run("let x = true; if (!x) { return 1; } return 2;");
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn asi_basic() {
+        let result = run("let x = 42\nreturn x");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn asi_return() {
+        let result = run("function f() { return\n42 }\nreturn f()");
+        assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn asi_before_brace() {
+        let result = run("let x = 10\nif (x > 5) { return x }");
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
+    fn bitwise_and() {
+        let result = run("return 0xFF & 0x0F;");
+        assert!(result.to_number() == 15.0);
+    }
+
+    #[test]
+    fn bitwise_or() {
+        let result = run("return 0xF0 | 0x0F;");
+        assert!(result.to_number() == 255.0);
+    }
+
+    #[test]
+    fn bitwise_xor() {
+        let result = run("return 5 ^ 3;");
+        assert!(result.to_number() == 6.0);
+    }
+
+    #[test]
+    fn bitwise_shift_left() {
+        let result = run("return 1 << 4;");
+        assert!(result.to_number() == 16.0);
+    }
+
+    #[test]
+    fn bitwise_shift_right() {
+        let result = run("return 16 >> 2;");
+        assert!(result.to_number() == 4.0);
+    }
+
+    #[test]
+    fn bitwise_not() {
+        let result = run("return ~0;");
+        assert!(result.to_number() == -1.0);
+    }
+
+    #[test]
+    fn logical_and_truthy() {
+        let result = run("return 1 && 42;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn logical_and_falsy() {
+        let result = run("return 0 && 42;");
+        assert!(result.to_number() == 0.0);
+    }
+
+    #[test]
+    fn logical_or_truthy() {
+        let result = run("return 1 || 42;");
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn logical_or_falsy() {
+        let result = run("return 0 || 42;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn typeof_number() {
+        let result = run(r#"return typeof 42;"#);
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn typeof_string() {
+        let result = run(r#"return typeof "hello";"#);
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn typeof_undefined() {
+        let result = run("return typeof undefined;");
+        assert!(result.is_string());
+    }
+
+    #[test]
+    fn for_in_basic() {
+        let result = run(
+            r#"
+            let obj = {a: 1, b: 2, c: 3};
+            let keys = "";
+            for (let k in obj) {
+                keys = keys + k;
+            }
+            return keys.length;
+        "#,
+        );
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn instanceof_basic() {
+        let result = run(
+            r#"
+            class Foo {}
+            let f = new Foo();
+            return f instanceof Foo;
+        "#,
+        );
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn in_operator() {
+        let result = run(r#"return "a" in {a: 1, b: 2};"#);
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn void_operator() {
+        let result = run("return void 42;");
+        assert!(result.is_undefined());
+    }
+
+    #[test]
+    fn ternary_true() {
+        let result = run("return true ? 1 : 2;");
+        assert!(result.to_number() == 1.0);
+    }
+
+    #[test]
+    fn ternary_false() {
+        let result = run("return false ? 1 : 2;");
         assert!(result.to_number() == 2.0);
     }
 }

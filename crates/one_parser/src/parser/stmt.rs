@@ -10,7 +10,7 @@ impl Parser<'_> {
             TokenKind::LBrace => self.parse_block_statement(),
             TokenKind::Var => {
                 let decl = self.parse_variable_declaration(VarKind::Var)?;
-                self.expect(&TokenKind::Semicolon)?;
+                self.expect_semicolon()?;
                 Ok(Statement {
                     kind: StatementKind::Declaration(decl),
                     span: self.span_from(start),
@@ -18,7 +18,7 @@ impl Parser<'_> {
             }
             TokenKind::Let => {
                 let decl = self.parse_variable_declaration(VarKind::Let)?;
-                self.expect(&TokenKind::Semicolon)?;
+                self.expect_semicolon()?;
                 Ok(Statement {
                     kind: StatementKind::Declaration(decl),
                     span: self.span_from(start),
@@ -26,7 +26,7 @@ impl Parser<'_> {
             }
             TokenKind::Const => {
                 let decl = self.parse_variable_declaration(VarKind::Const)?;
-                self.expect(&TokenKind::Semicolon)?;
+                self.expect_semicolon()?;
                 Ok(Statement {
                     kind: StatementKind::Declaration(decl),
                     span: self.span_from(start),
@@ -86,7 +86,7 @@ impl Parser<'_> {
             }
             _ => {
                 let expr = self.parse_expression()?;
-                self.expect(&TokenKind::Semicolon)?;
+                self.expect_semicolon()?;
                 Ok(Statement {
                     kind: StatementKind::ExpressionStatement(expr),
                     span: self.span_from(start),
@@ -186,7 +186,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::LParen)?;
         let test = self.parse_expression()?;
         self.expect(&TokenKind::RParen)?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.expect_semicolon()?;
         Ok(Statement {
             kind: StatementKind::DoWhileStatement { test, body },
             span: self.span_from(start),
@@ -309,12 +309,13 @@ impl Parser<'_> {
         let argument = if self.at(&TokenKind::Semicolon)
             || self.at(&TokenKind::RBrace)
             || self.at_eof()
+            || self.had_newline_before()
         {
             None
         } else {
             Some(self.parse_expression()?)
         };
-        self.expect(&TokenKind::Semicolon)?;
+        self.expect_semicolon()?;
         Ok(Statement {
             kind: StatementKind::ReturnStatement(argument),
             span: self.span_from(start),
@@ -325,7 +326,7 @@ impl Parser<'_> {
         let start = self.current.span.start;
         self.expect(&TokenKind::Throw)?;
         let argument = self.parse_expression()?;
-        self.expect(&TokenKind::Semicolon)?;
+        self.expect_semicolon()?;
         Ok(Statement {
             kind: StatementKind::ThrowStatement(argument),
             span: self.span_from(start),
@@ -436,12 +437,12 @@ impl Parser<'_> {
         } else {
             self.expect(&TokenKind::Continue)?;
         }
-        let label = if self.at_identifier() {
+        let label = if self.at_identifier() && !self.had_newline_before() {
             Some(self.parse_identifier_name()?)
         } else {
             None
         };
-        self.expect(&TokenKind::Semicolon)?;
+        self.expect_semicolon()?;
         Ok(Statement {
             kind: if is_break {
                 StatementKind::BreakStatement(label)
