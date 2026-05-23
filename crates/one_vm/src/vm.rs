@@ -1375,6 +1375,25 @@ impl Vm {
                     let type_str = val.type_of();
                     self.stack[base + dest as usize] = self.alloc_string(type_str.to_string());
                 }
+                Opcode::Nop => {}
+                Opcode::Inc => {
+                    let b = self.stack[base + instr.b() as usize];
+                    let result = if let Some(i) = b.as_i32() {
+                        JsValue::from_i32(i + 1)
+                    } else {
+                        JsValue::from_f64(b.to_number() + 1.0)
+                    };
+                    self.stack[base + instr.a() as usize] = result;
+                }
+                Opcode::Dec => {
+                    let b = self.stack[base + instr.b() as usize];
+                    let result = if let Some(i) = b.as_i32() {
+                        JsValue::from_i32(i - 1)
+                    } else {
+                        JsValue::from_f64(b.to_number() - 1.0)
+                    };
+                    self.stack[base + instr.a() as usize] = result;
+                }
                 _ => {}
             }
         }

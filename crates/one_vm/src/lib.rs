@@ -471,4 +471,42 @@ mod tests {
         obj.set_property("b".to_string(), JsValue::from_i32(2));
         assert_eq!(obj.enumerable_keys().len(), 2);
     }
+
+    #[test]
+    fn constant_folding() {
+        let result = run("return 2 + 3;");
+        assert!(result.to_number() == 5.0);
+    }
+
+    #[test]
+    fn constant_folding_mul() {
+        let result = run("return 6 * 7;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn inc_dec_pattern() {
+        let result = run("let x = 0; x = x + 1; x = x + 1; x = x + 1; return x;");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn dec_pattern() {
+        let result = run("let x = 10; x = x - 1; return x;");
+        assert!(result.to_number() == 9.0);
+    }
+
+    #[test]
+    fn loop_counter_optimized() {
+        let result = run(
+            "let sum = 0; let i = 0; while(i < 1000) { sum = sum + i; i = i + 1; } return sum;",
+        );
+        assert!(result.to_number() == 499500.0);
+    }
+
+    #[test]
+    fn not_jump_fusion() {
+        let result = run("let x = true; if (!x) { return 1; } return 2;");
+        assert!(result.to_number() == 2.0);
+    }
 }

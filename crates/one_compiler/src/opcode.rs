@@ -96,13 +96,18 @@ pub enum Opcode {
     // Debug / special
     Debugger, //       debugger statement
 
+    // Peephole / specialized
+    Nop, //             no operation (peephole placeholder)
+    Inc, // AB:        r[A] = r[B] + 1
+    Dec, // AB:        r[A] = r[B] - 1
+
     // Placeholder for future opcodes
     Wide = 255, // Wide prefix for extended operands
 }
 
 impl Opcode {
     pub fn from_u8(v: u8) -> Option<Self> {
-        if v <= Self::Debugger as u8 || v == 255 {
+        if v <= Self::Dec as u8 || v == 255 {
             Some(unsafe { std::mem::transmute::<u8, Opcode>(v) })
         } else {
             None

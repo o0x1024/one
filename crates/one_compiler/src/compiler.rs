@@ -4,6 +4,7 @@ use one_parser::ast::*;
 
 use crate::codeblock::{CodeBlock, Constant, ImportSpec, ModuleExport, ModuleImport, ModuleInfo};
 use crate::opcode::{Instruction, Opcode};
+use crate::peephole::optimize_recursive;
 
 pub struct Compiler {
     code: CodeBlock,
@@ -43,6 +44,7 @@ impl Compiler {
             compiler.compile_statement(stmt);
         }
         compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+        optimize_recursive(&mut compiler.code);
         compiler.code
     }
 
@@ -63,11 +65,13 @@ impl Compiler {
             {
                 let reg = compiler.compile_expression(expr);
                 compiler.code.emit(Instruction::abx(Opcode::Return, reg, 0));
+                optimize_recursive(&mut compiler.code);
                 return compiler.code;
             }
             compiler.compile_statement(stmt);
         }
         compiler.code.emit(Instruction::op_only(Opcode::ReturnUndef));
+        optimize_recursive(&mut compiler.code);
         compiler.code
     }
 
@@ -926,6 +930,8 @@ impl Compiler {
             } => {
                 if *operator == BinaryOp::NullishCoalescing {
                     self.compile_nullish_coalescing(left, right, dest);
+                } else if let Some(folded) = try_constant_fold(*operator, left, right) {
+                    self.emit_number_literal(dest, folded);
                 } else {
                     let left_reg = self.compile_expression(left);
                     let right_reg = self.compile_expression(right);
@@ -1401,6 +1407,10 @@ impl Compiler {
         right: &Expression,
         dest: u8,
     ) {
+        if self.try_emit_inc_dec(left, right, dest) {
+            return;
+        }
+
         let value_reg = self.compile_expression(right);
         match left {
             AssignTarget::Identifier(name) => {
@@ -1473,6 +1483,86 @@ impl Compiler {
         self.free_reg();
     }
 
+    fn emit_number_literal(&mut self, dest: u8, n: f64) {
+        let i = n as i32;
+        if i as f64 == n && i >= i16::MIN as i32 && i <= i16::MAX as i32 {
+            self.code
+                .emit(Instruction::asbx(Opcode::LoadInt, dest, i as i16));
+        } else {
+            let idx = self.code.add_constant(Constant::Number(n));
+            self.code
+                .emit(Instruction::abx(Opcode::LoadConst, dest, idx));
+        }
+    }
+
+    fn try_emit_inc_dec(&mut self, left: &AssignTarget, right: &Expression, dest: u8) -> bool {
+        let AssignTarget::Identifier(name) = left else {
+            return false;
+        };
+        let Some(opcode) = self.inc_dec_opcode(name, right) else {
+            return false;
+        };
+
+        if let Some(&reg) = self.locals.get(name) {
+            self.code.emit(Instruction::abc(opcode, reg, reg, 0));
+            if self.is_top_level {
+                let name_idx = self.add_string(name);
+                self.code
+                    .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+                self.mirrored_globals.insert(name.clone());
+            }
+            if dest != reg {
+                self.code
+                    .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+            }
+        } else {
+            let reg = self.alloc_reg();
+            let name_idx = self.add_string(name);
+            self.code
+                .emit(Instruction::abx(Opcode::GetGlobal, reg, name_idx));
+            self.code.emit(Instruction::abc(opcode, reg, reg, 0));
+            self.code
+                .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+            if dest != reg {
+                self.code
+                    .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+            }
+            self.free_reg();
+        }
+        true
+    }
+
+    fn inc_dec_opcode(&self, name: &str, right: &Expression) -> Option<Opcode> {
+        let ExpressionKind::BinaryExpression {
+            operator,
+            left,
+            right: rhs,
+        } = &right.kind
+        else {
+            return None;
+        };
+        match operator {
+            BinaryOp::Add => {
+                let inc = (self.expr_is_identifier(left, name) && self.expr_is_number_one(rhs))
+                    || (self.expr_is_identifier(rhs, name) && self.expr_is_number_one(left));
+                inc.then_some(Opcode::Inc)
+            }
+            BinaryOp::Sub => {
+                (self.expr_is_identifier(left, name) && self.expr_is_number_one(rhs))
+                    .then_some(Opcode::Dec)
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_is_identifier(&self, expr: &Expression, name: &str) -> bool {
+        matches!(&expr.kind, ExpressionKind::Identifier(n) if n == name)
+    }
+
+    fn expr_is_number_one(&self, expr: &Expression) -> bool {
+        matches!(&expr.kind, ExpressionKind::NumberLiteral(n) if *n == 1.0)
+    }
+
     fn compile_object_property(&mut self, obj_reg: u8, prop: &ObjectProperty) {
         match &prop.kind {
             ObjectPropertyKind::Property {
@@ -1504,6 +1594,22 @@ impl Compiler {
             }
             ObjectPropertyKind::Method { .. } | ObjectPropertyKind::SpreadElement(_) => {}
         }
+    }
+}
+
+fn try_constant_fold(op: BinaryOp, left: &Expression, right: &Expression) -> Option<f64> {
+    if let ExpressionKind::NumberLiteral(l) = &left.kind
+        && let ExpressionKind::NumberLiteral(r) = &right.kind
+    {
+        match op {
+            BinaryOp::Add => Some(l + r),
+            BinaryOp::Sub => Some(l - r),
+            BinaryOp::Mul => Some(l * r),
+            BinaryOp::Div if *r != 0.0 => Some(l / r),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -1628,9 +1734,17 @@ mod tests {
 
     #[test]
     fn compile_binary_add() {
-        let code = compile("1 + 2;");
+        let code = compile("let x = 1; return x + 2;");
         let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
         assert!(opcodes.contains(&Opcode::Add));
+    }
+
+    #[test]
+    fn compile_binary_add_folded() {
+        let code = compile("return 1 + 2;");
+        let opcodes: Vec<_> = code.bytecode.iter().map(|i| i.opcode()).collect();
+        assert!(!opcodes.contains(&Opcode::Add));
+        assert!(opcodes.contains(&Opcode::LoadInt));
     }
 
     #[test]
