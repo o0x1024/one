@@ -489,6 +489,78 @@ mod tests {
     }
 
     #[test]
+    fn gc_minor_collection() {
+        let mut engine = Engine::new();
+        engine.vm_mut().set_gc_threshold(1024);
+        let result = engine
+            .eval(
+                r#"
+            let last = 0;
+            let i = 0;
+            while (i < 200) {
+                let obj = {value: i};
+                last = obj.value;
+                i = i + 1;
+            }
+            return last;
+        "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 199.0);
+    }
+
+    #[test]
+    fn gc_generation_promotion() {
+        let mut engine = Engine::new();
+        engine.vm_mut().set_gc_threshold(2048);
+        let result = engine
+            .eval(
+                r#"
+            let keeper = {x: 42};
+            let i = 0;
+            while (i < 500) {
+                let temp = {y: i};
+                i = i + 1;
+            }
+            return keeper.x;
+        "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn weakref_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+            let obj = {value: 42};
+            let wr = new WeakRef(obj);
+            return wr.deref().value;
+        "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn weakref_deref_alive() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+            let obj = {x: 10};
+            let weak_ref = new WeakRef(obj);
+            let val = weak_ref.deref();
+            return val.x;
+        "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 10.0);
+    }
+
+    #[test]
     fn array_push() {
         let mut engine = Engine::new();
         let result = engine

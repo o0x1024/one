@@ -15,6 +15,7 @@ pub mod regexp;
 pub mod string;
 pub mod symbol;
 pub mod timers;
+pub mod weakref;
 
 pub use preset::{BuiltinModule, Preset, SANDBOX_DEFAULT_FUEL, install_preset};
 
@@ -38,4 +39,5 @@ pub fn install_builtins(vm: &mut Vm) {
     date::install_date(vm);
     symbol::install_symbol(vm);
     regexp::install_regexp(vm);
+    weakref::install_weakref(vm);
 }

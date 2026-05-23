@@ -43,6 +43,18 @@ struct TimerEntry {
     cancelled: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct GcStats {
+    pub total_allocated: usize,
+    pub total_collected: usize,
+    pub gc_count: u32,
+    pub minor_gc_count: u32,
+    pub major_gc_count: u32,
+    pub nursery_size: usize,
+    pub old_gen_size: usize,
+    pub alloc_count: usize,
+}
+
 /// Host callbacks invoked at key execution points.
 pub trait ExecutionHook: Send + 'static {
     fn on_call(&mut self, _func_name: &str) -> bool {
@@ -87,6 +99,7 @@ pub struct Vm {
     set_prototype: Option<JsValue>,
     date_prototype: Option<JsValue>,
     regexp_prototype: Option<JsValue>,
+    weakref_prototype: Option<JsValue>,
     symbol_counter: u32,
     symbol_descriptions: Vec<Option<String>>,
     global_symbols: HashMap<String, u32>,
@@ -117,6 +130,7 @@ impl Vm {
             set_prototype: None,
             date_prototype: None,
             regexp_prototype: None,
+            weakref_prototype: None,
             symbol_counter: 0,
             symbol_descriptions: Vec::new(),
             global_symbols: HashMap::new(),
@@ -212,6 +226,10 @@ impl Vm {
         self.regexp_prototype = Some(proto);
     }
 
+    pub fn set_weakref_prototype(&mut self, proto: JsValue) {
+        self.weakref_prototype = Some(proto);
+    }
+
     pub fn create_symbol(&mut self, description: Option<String>) -> u32 {
         let id = self.symbol_counter;
         self.symbol_counter += 1;
@@ -266,6 +284,20 @@ impl Vm {
         {
             obj.set_prototype(Some(raw as *mut JsObject));
         }
+    }
+
+    fn apply_weakref_prototype(&self, obj: &mut JsObject) {
+        if let Some(proto_val) = self.weakref_prototype
+            && let Some(raw) = proto_val.as_object_raw()
+        {
+            obj.set_prototype(Some(raw as *mut JsObject));
+        }
+    }
+
+    pub fn new_weakref(&mut self, target: JsValue) -> JsValue {
+        let mut obj = JsObject::with_kind(ObjectKind::WeakRef(target));
+        self.apply_weakref_prototype(&mut obj);
+        self.alloc_object(obj)
     }
 
     pub fn new_array(&mut self, length: u32) -> JsValue {
@@ -682,8 +714,36 @@ impl Vm {
     fn run_gc(&mut self) {
         let mut roots = Vec::new();
         self.collect_gc_roots(&mut roots);
-        self.heap.collect(&roots);
+        if self.heap.should_major_collect() {
+            self.heap.major_collect(&roots);
+        } else {
+            self.heap.minor_collect(&roots);
+        }
+        self.clear_dead_weak_refs();
         self.heap.grow_threshold();
+    }
+
+    fn clear_dead_weak_refs(&mut self) {
+        let mut dead = Vec::new();
+        self.heap.visit_objects(|data_ptr| {
+            unsafe {
+                let obj = &*(data_ptr as *const JsObject);
+                if let ObjectKind::WeakRef(target) = obj.kind()
+                    && target.is_object()
+                    && let Some(raw) = target.as_object_raw()
+                    && !self.heap.contains_ptr(raw as *const u8)
+                {
+                    dead.push(data_ptr as *mut JsObject);
+                }
+            }
+        });
+        for ptr in dead {
+            unsafe {
+                if let ObjectKind::WeakRef(target) = (&mut *ptr).kind_mut() {
+                    *target = JsValue::undefined();
+                }
+            }
+        }
     }
 
     fn collect_gc_roots(&self, roots: &mut Vec<*const u8>) {
@@ -720,6 +780,24 @@ impl Vm {
 
     pub fn set_gc_threshold(&mut self, threshold: usize) {
         self.heap.set_gc_threshold(threshold);
+    }
+
+    pub fn gc_stats(&self) -> GcStats {
+        let stats = self.heap.stats();
+        GcStats {
+            total_allocated: stats.bytes_allocated,
+            total_collected: stats.total_collected,
+            gc_count: stats.gc_count,
+            minor_gc_count: stats.minor_gc_count,
+            major_gc_count: stats.major_gc_count,
+            nursery_size: stats.nursery_size,
+            old_gen_size: stats.old_gen_size,
+            alloc_count: stats.alloc_count,
+        }
+    }
+
+    pub fn heap_contains_ptr(&self, ptr: *const u8) -> bool {
+        self.heap.contains_ptr(ptr)
     }
 
     /// Get a reference to a JsObject from a JsValue

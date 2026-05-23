@@ -60,6 +60,8 @@ pub enum ObjectKind {
     Promise(PromiseState),
     Date(f64),
     RegExp { pattern: String, flags: String },
+    /// Holds a weak reference to a target; target is NOT traced during GC.
+    WeakRef(JsValue),
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +132,12 @@ impl Trace for JsObject {
                 PromiseState::Fulfilled(val) | PromiseState::Rejected(val) => {
                     trace_js_value(*val, tracer);
                 }
+            }
+        }
+        // WeakRef targets are intentionally not traced — they must not keep objects alive.
+        if let ObjectKind::Function(func_obj) = &self.kind {
+            for val in &func_obj.upvalues {
+                trace_js_value(*val, tracer);
             }
         }
     }
