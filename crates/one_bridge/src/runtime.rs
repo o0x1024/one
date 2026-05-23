@@ -1,7 +1,8 @@
 use one_core::OneResult;
-use one_engine::Engine;
-use one_engine::EngineBuilder;
+use one_engine::{Engine, EngineBuilder, RuntimeLimits};
 use serde_json::Value as JsonValue;
+
+use crate::extensions::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -34,10 +35,21 @@ impl PluginRuntime {
             ..Default::default()
         };
 
-        let mut engine = EngineBuilder::<PluginState>::new().build_with_store(state);
-
-        crate::sentinel_api::install_sentinel_api(&mut engine);
-        crate::ops::install_plugin_ops(&mut engine);
+        let engine = EngineBuilder::<PluginState>::new()
+            .limits(RuntimeLimits {
+                max_operations: Some(10_000_000),
+                max_call_depth: Some(64),
+                ..Default::default()
+            })
+            .extension(SentinelCoreExtension::new())
+            .extension(FetchExtension::new())
+            .extension(FsExtension::new())
+            .extension(NetworkExtension::new())
+            .extension(DictionaryExtension::new())
+            .extension(TlsExtension::new())
+            .extension(MonitorExtension::new())
+            .extension(AstExtension::new())
+            .build_with_store(state);
 
         PluginRuntime { engine }
     }

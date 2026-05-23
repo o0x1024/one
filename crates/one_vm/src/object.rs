@@ -62,6 +62,34 @@ pub enum ObjectKind {
     RegExp { pattern: String, flags: String },
     /// Holds a weak reference to a target; target is NOT traced during GC.
     WeakRef(JsValue),
+    /// Internal iterator state for for-of loops.
+    Iterator(IteratorKind),
+}
+
+/// Tracks iteration progress for built-in iterable types.
+#[derive(Debug, Clone)]
+pub enum IteratorKind {
+    Array {
+        source: JsValue,
+        index: u32,
+        length: u32,
+    },
+    String {
+        chars: Vec<char>,
+        index: usize,
+    },
+    MapEntries {
+        entries: Vec<(JsValue, JsValue)>,
+        index: usize,
+    },
+    SetValues {
+        values: Vec<JsValue>,
+        index: usize,
+    },
+    /// User-defined: object returned by [Symbol.iterator]() with a .next() method.
+    UserDefined {
+        next_fn: JsValue,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +107,9 @@ pub enum PromiseState {
 pub struct FunctionObject {
     pub name: String,
     pub code: CodeBlock,
-    pub upvalues: Vec<JsValue>,
+    /// Indices into the VM's upvalue cell table. Each entry identifies
+    /// a shared upvalue cell that is either open (stack slot) or closed (owned value).
+    pub upvalue_cells: Vec<u32>,
     pub param_count: u16,
 }
 
@@ -135,9 +165,24 @@ impl Trace for JsObject {
             }
         }
         // WeakRef targets are intentionally not traced — they must not keep objects alive.
-        if let ObjectKind::Function(func_obj) = &self.kind {
-            for val in &func_obj.upvalues {
-                trace_js_value(*val, tracer);
+        // FunctionObject.upvalue_cells contains indices into the VM's upvalue table,
+        // not JsValues — closed upvalue values are traced via VM's collect_gc_roots.
+        if let ObjectKind::Iterator(kind) = &self.kind {
+            match kind {
+                IteratorKind::Array { source, .. } => trace_js_value(*source, tracer),
+                IteratorKind::MapEntries { entries, .. } => {
+                    for (k, v) in entries {
+                        trace_js_value(*k, tracer);
+                        trace_js_value(*v, tracer);
+                    }
+                }
+                IteratorKind::SetValues { values, .. } => {
+                    for v in values {
+                        trace_js_value(*v, tracer);
+                    }
+                }
+                IteratorKind::UserDefined { next_fn } => trace_js_value(*next_fn, tracer),
+                IteratorKind::String { .. } => {}
             }
         }
     }

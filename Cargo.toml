@@ -17,7 +17,7 @@ members = [
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/user/one"
+repository = "https://github.com/o0x1024/one"
 
 [workspace.dependencies]
 one_core = { path = "crates/one_core" }

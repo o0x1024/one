@@ -2,9 +2,23 @@ use std::collections::{HashMap, HashSet};
 
 use one_parser::ast::*;
 
-use crate::codeblock::{CodeBlock, Constant, ImportSpec, ModuleExport, ModuleImport, ModuleInfo};
+use crate::codeblock::{CodeBlock, Constant, ImportSpec, ModuleExport, ModuleImport, ModuleInfo, UpvalueDesc};
 use crate::opcode::{Instruction, Opcode};
 use crate::peephole::optimize_recursive;
+
+enum NameResolution {
+    Local(u8),
+    Upvalue(u8),
+    Global,
+}
+
+/// Snapshot of an enclosing function's variable binding state, used for
+/// resolving upvalues across nesting levels.
+#[derive(Clone)]
+struct EnclosingScope {
+    locals: HashMap<String, u8>,
+    upvalue_descs: Vec<UpvalueDesc>,
+}
 
 pub struct Compiler {
     code: CodeBlock,
@@ -12,6 +26,9 @@ pub struct Compiler {
     locals: HashMap<String, u8>,
     mirrored_globals: HashSet<String>,
     is_top_level: bool,
+    upvalue_descs: Vec<UpvalueDesc>,
+    /// Chain of enclosing scopes from immediate parent (index 0) outward.
+    enclosing_scopes: Vec<EnclosingScope>,
 }
 
 impl Compiler {
@@ -22,6 +39,8 @@ impl Compiler {
             locals: HashMap::new(),
             mirrored_globals: HashSet::new(),
             is_top_level: true,
+            upvalue_descs: Vec::new(),
+            enclosing_scopes: Vec::new(),
         }
     }
 
@@ -29,6 +48,129 @@ impl Compiler {
         let mut compiler = Compiler::new(name);
         compiler.is_top_level = false;
         compiler
+    }
+
+    /// Resolve an identifier, returning how it should be accessed.
+    fn resolve_name(&mut self, name: &str) -> NameResolution {
+        if self.is_top_level && self.mirrored_globals.contains(name) {
+            return NameResolution::Global;
+        }
+        if let Some(&reg) = self.locals.get(name) {
+            return NameResolution::Local(reg);
+        }
+        if self.is_top_level {
+            return NameResolution::Global;
+        }
+        if let Some(idx) = self.find_or_add_upvalue(name) {
+            return NameResolution::Upvalue(idx);
+        }
+        NameResolution::Global
+    }
+
+    /// Try to find (or create) an upvalue for `name` by searching enclosing scopes.
+    fn find_or_add_upvalue(&mut self, name: &str) -> Option<u8> {
+        for (i, existing) in self.upvalue_descs.iter().enumerate() {
+            if existing.name == name {
+                return Some(i as u8);
+            }
+        }
+
+        if self.enclosing_scopes.is_empty() {
+            return None;
+        }
+
+        let parent = &self.enclosing_scopes[0];
+        if let Some(&reg) = parent.locals.get(name) {
+            let idx = self.upvalue_descs.len() as u8;
+            self.upvalue_descs.push(UpvalueDesc {
+                name: name.to_string(),
+                is_local: true,
+                index: reg,
+            });
+            return Some(idx);
+        }
+
+        for (i, desc) in parent.upvalue_descs.iter().enumerate() {
+            if desc.name == name {
+                let idx = self.upvalue_descs.len() as u8;
+                self.upvalue_descs.push(UpvalueDesc {
+                    name: name.to_string(),
+                    is_local: false,
+                    index: i as u8,
+                });
+                return Some(idx);
+            }
+        }
+
+        // Transitive capture: search grandparent+ scopes.
+        // If found, we need to ensure each intermediate scope relays the upvalue.
+        for depth in 1..self.enclosing_scopes.len() {
+            let scope = &self.enclosing_scopes[depth];
+            let found_local = scope.locals.get(name).copied();
+            let found_upvalue = if found_local.is_none() {
+                scope.upvalue_descs.iter().position(|d| d.name == name).map(|i| i as u8)
+            } else {
+                None
+            };
+
+            if found_local.is_some() || found_upvalue.is_some() {
+                // Build relay chain from scope[depth] up to scope[0]
+                let mut relay_is_local;
+                let mut relay_index;
+                if let Some(reg) = found_local {
+                    relay_is_local = true;
+                    relay_index = reg;
+                } else {
+                    relay_is_local = false;
+                    relay_index = found_upvalue.unwrap();
+                }
+
+                // Add relay upvalues to intermediate scopes (depth-1 down to 0)
+                for d in (0..depth).rev() {
+                    let existing_idx = self.enclosing_scopes[d]
+                        .upvalue_descs
+                        .iter()
+                        .position(|desc| desc.name == name);
+                    if let Some(ei) = existing_idx {
+                        relay_is_local = false;
+                        relay_index = ei as u8;
+                    } else {
+                        let new_idx = self.enclosing_scopes[d].upvalue_descs.len() as u8;
+                        self.enclosing_scopes[d].upvalue_descs.push(UpvalueDesc {
+                            name: name.to_string(),
+                            is_local: relay_is_local,
+                            index: relay_index,
+                        });
+                        relay_is_local = false;
+                        relay_index = new_idx;
+                    }
+                }
+
+                let idx = self.upvalue_descs.len() as u8;
+                self.upvalue_descs.push(UpvalueDesc {
+                    name: name.to_string(),
+                    is_local: relay_is_local,
+                    index: relay_index,
+                });
+                return Some(idx);
+            }
+        }
+
+        None
+    }
+
+    /// Resolve how an assignment target identifier should be written.
+    fn resolve_name_for_assign(&mut self, name: &str) -> NameResolution {
+        if let Some(&reg) = self.locals.get(name) {
+            return NameResolution::Local(reg);
+        }
+        if self.is_top_level {
+            return NameResolution::Global;
+        }
+        if let Some(idx) = self.find_or_add_upvalue(name) {
+            return NameResolution::Upvalue(idx);
+        }
+        NameResolution::Global
     }
 
     pub fn compile(program: &Program) -> CodeBlock {
@@ -657,10 +799,42 @@ impl Compiler {
     }
 
     fn compile_for_of(&mut self, left: &ForInOfLeft, right: &Expression, body: &Statement) {
+        // Compile iterable, then overwrite with its iterator object (same register)
         let iter_reg = self.compile_expression(right);
-        self.compile_for_of_iter(iter_reg, left, body);
+        self.code
+            .emit(Instruction::abc(Opcode::GetIterator, iter_reg, iter_reg, 0));
+
+        let loop_start = self.code.current_offset();
+
+        let done_reg = self.alloc_reg();
+        self.code
+            .emit(Instruction::abc(Opcode::IteratorDone, done_reg, iter_reg, 0));
+        let jump_end = self
+            .code
+            .emit(Instruction::asbx(Opcode::JumpIfTrue, done_reg, 0));
+        self.free_reg(); // free done_reg
+
+        let elem_reg = self.alloc_reg();
+        self.code
+            .emit(Instruction::abc(Opcode::IteratorNext, elem_reg, iter_reg, 0));
+
+        let bound_local = self.compile_for_of_left(left, elem_reg);
+
+        self.compile_statement(body);
+
+        let jump_back = self.code.emit(Instruction::asbx(Opcode::Jump, 0, 0));
+        self.code.patch_jump(jump_back, loop_start);
+
+        let end = self.code.current_offset();
+        self.code.patch_jump(jump_end, end);
+
+        if !bound_local {
+            self.free_reg(); // free elem_reg
+        }
+        self.free_reg(); // free iter_reg
     }
 
+    /// For-in still uses Object.keys() + index/length loop (not iterator protocol).
     fn compile_for_of_iter(&mut self, iter_reg: u8, left: &ForInOfLeft, body: &Statement) {
 
         let idx_reg = self.alloc_reg();
@@ -751,6 +925,19 @@ impl Compiler {
         inner.code.is_async = func.is_async;
         inner.code.is_generator = func.is_generator;
 
+        // Build enclosing scope chain for upvalue resolution.
+        // Top-level locals are mirrored to globals, so children of top-level
+        // should resolve those variables through globals (not upvalues) to keep
+        // a single source of truth.
+        if !self.is_top_level {
+            let mut scopes = vec![EnclosingScope {
+                locals: self.locals.clone(),
+                upvalue_descs: self.upvalue_descs.clone(),
+            }];
+            scopes.extend(self.enclosing_scopes.clone());
+            inner.enclosing_scopes = scopes;
+        }
+
         for (i, param) in func.params.iter().enumerate() {
             if let PatternKind::Identifier { name, .. } = &param.kind {
                 inner.locals.insert(name.clone(), i as u8);
@@ -775,6 +962,22 @@ impl Compiler {
                 inner.code.emit(Instruction::op_only(Opcode::ReturnUndef));
             }
         }
+
+        // Propagate relay upvalues: if the inner compiler added upvalues to
+        // our enclosing_scopes[0] (which is a snapshot of *our* state),
+        // we need to adopt those new descriptors so that subsequent inner
+        // functions compiled by us can reference them.
+        if !inner.enclosing_scopes.is_empty() {
+            let parent_scope = &inner.enclosing_scopes[0];
+            if parent_scope.upvalue_descs.len() > self.upvalue_descs.len() {
+                for desc in parent_scope.upvalue_descs[self.upvalue_descs.len()..].iter() {
+                    self.upvalue_descs.push(desc.clone());
+                }
+            }
+        }
+
+        inner.code.upvalue_count = inner.upvalue_descs.len() as u16;
+        inner.code.upvalue_descs = inner.upvalue_descs;
 
         let idx = self.code.inner_functions.len();
         self.code.inner_functions.push(inner.code);
@@ -889,16 +1092,17 @@ impl Compiler {
                 self.code.emit(Instruction::abx(Opcode::LoadNull, dest, 0));
             }
             ExpressionKind::Identifier(name) => {
-                if self.is_top_level && self.mirrored_globals.contains(name) {
-                    let idx = self.add_string(name);
-                    self.code
-                        .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
-                } else if let Some(&reg) = self.locals.get(name) {
-                    self.code.emit(Instruction::abc(Opcode::Move, dest, reg, 0));
-                } else {
-                    let idx = self.add_string(name);
-                    self.code
-                        .emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+                match self.resolve_name(name) {
+                    NameResolution::Local(reg) => {
+                        self.code.emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+                    }
+                    NameResolution::Upvalue(idx) => {
+                        self.code.emit(Instruction::abc(Opcode::GetUpvalue, dest, idx, 0));
+                    }
+                    NameResolution::Global => {
+                        let idx = self.add_string(name);
+                        self.code.emit(Instruction::abx(Opcode::GetGlobal, dest, idx));
+                    }
                 }
             }
             ExpressionKind::This => {
@@ -1276,10 +1480,16 @@ impl Compiler {
             ExpressionKind::TaggedTemplateExpression { .. } => {
                 self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
             }
+            ExpressionKind::AwaitExpression(argument) => {
+                let val_reg = self.alloc_reg();
+                self.compile_expression_to(argument, val_reg);
+                self.code
+                    .emit(Instruction::abc(Opcode::Await, dest, val_reg, 0));
+                self.free_reg();
+            }
             ExpressionKind::BigIntLiteral(_)
             | ExpressionKind::RegExpLiteral { .. }
             | ExpressionKind::YieldExpression { .. }
-            | ExpressionKind::AwaitExpression(_)
             | ExpressionKind::MetaProperty { .. }
             | ExpressionKind::ImportExpression(_) => {
                 self.code.emit(Instruction::abx(Opcode::LoadUndef, dest, 0));
@@ -1451,28 +1661,39 @@ impl Compiler {
         let value_reg = self.compile_expression(right);
         match left {
             AssignTarget::Identifier(name) => {
-                if let Some(&reg) = self.locals.get(name) {
-                    if reg != value_reg {
-                        self.code
-                            .emit(Instruction::abc(Opcode::Move, reg, value_reg, 0));
+                match self.resolve_name_for_assign(name) {
+                    NameResolution::Local(reg) => {
+                        if reg != value_reg {
+                            self.code
+                                .emit(Instruction::abc(Opcode::Move, reg, value_reg, 0));
+                        }
+                        if self.is_top_level {
+                            let name_idx = self.add_string(name);
+                            self.code
+                                .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
+                            self.mirrored_globals.insert(name.clone());
+                        }
+                        if dest != reg {
+                            self.code
+                                .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                        }
                     }
-                    if self.is_top_level {
+                    NameResolution::Upvalue(uv_idx) => {
+                        self.code
+                            .emit(Instruction::abc(Opcode::SetUpvalue, uv_idx, value_reg, 0));
+                        if dest != value_reg {
+                            self.code
+                                .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                        }
+                    }
+                    NameResolution::Global => {
                         let name_idx = self.add_string(name);
                         self.code
                             .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
-                        self.mirrored_globals.insert(name.clone());
-                    }
-                    if dest != reg {
-                        self.code
-                            .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
-                    }
-                } else {
-                    let name_idx = self.add_string(name);
-                    self.code
-                        .emit(Instruction::abx(Opcode::SetGlobal, value_reg, name_idx));
-                    if dest != value_reg {
-                        self.code
-                            .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                        if dest != value_reg {
+                            self.code
+                                .emit(Instruction::abc(Opcode::Move, dest, value_reg, 0));
+                        }
                     }
                 }
             }
@@ -1540,31 +1761,45 @@ impl Compiler {
             return false;
         };
 
-        if let Some(&reg) = self.locals.get(name) {
-            self.code.emit(Instruction::abc(opcode, reg, reg, 0));
-            if self.is_top_level {
+        match self.resolve_name_for_assign(name) {
+            NameResolution::Local(reg) => {
+                self.code.emit(Instruction::abc(opcode, reg, reg, 0));
+                if self.is_top_level {
+                    let name_idx = self.add_string(name);
+                    self.code
+                        .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
+                    self.mirrored_globals.insert(name.clone());
+                }
+                if dest != reg {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+                }
+            }
+            NameResolution::Upvalue(uv_idx) => {
+                let reg = self.alloc_reg();
+                self.code.emit(Instruction::abc(Opcode::GetUpvalue, reg, uv_idx, 0));
+                self.code.emit(Instruction::abc(opcode, reg, reg, 0));
+                self.code.emit(Instruction::abc(Opcode::SetUpvalue, uv_idx, reg, 0));
+                if dest != reg {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+                }
+                self.free_reg();
+            }
+            NameResolution::Global => {
+                let reg = self.alloc_reg();
                 let name_idx = self.add_string(name);
                 self.code
+                    .emit(Instruction::abx(Opcode::GetGlobal, reg, name_idx));
+                self.code.emit(Instruction::abc(opcode, reg, reg, 0));
+                self.code
                     .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
-                self.mirrored_globals.insert(name.clone());
+                if dest != reg {
+                    self.code
+                        .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
+                }
+                self.free_reg();
             }
-            if dest != reg {
-                self.code
-                    .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
-            }
-        } else {
-            let reg = self.alloc_reg();
-            let name_idx = self.add_string(name);
-            self.code
-                .emit(Instruction::abx(Opcode::GetGlobal, reg, name_idx));
-            self.code.emit(Instruction::abc(opcode, reg, reg, 0));
-            self.code
-                .emit(Instruction::abx(Opcode::SetGlobal, reg, name_idx));
-            if dest != reg {
-                self.code
-                    .emit(Instruction::abc(Opcode::Move, dest, reg, 0));
-            }
-            self.free_reg();
         }
         true
     }

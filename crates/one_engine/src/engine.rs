@@ -5,10 +5,14 @@ use one_core::{CompileError, JsValue, OneError, OneResult};
 use one_parser::parser::Parser;
 use one_vm::{ExecutionHook, Vm};
 
+use crate::module_resolver::{ModuleResolver, StaticModuleResolver};
+use crate::type_map::TypeMap;
+
 pub struct Engine<T: 'static = ()> {
     vm: Vm,
     store: T,
-    registered_modules: HashMap<String, String>,
+    type_map: TypeMap,
+    module_resolver: Box<dyn ModuleResolver>,
     module_cache: HashMap<String, HashMap<String, JsValue>>,
     baseline_globals: HashMap<String, JsValue>,
 }
@@ -23,14 +27,16 @@ impl<T: 'static> Engine<T> {
     pub(crate) fn from_parts(
         vm: Vm,
         store: T,
-        registered_modules: HashMap<String, String>,
+        type_map: TypeMap,
+        module_resolver: Box<dyn ModuleResolver>,
         module_cache: HashMap<String, HashMap<String, JsValue>>,
         baseline_globals: HashMap<String, JsValue>,
     ) -> Self {
         Self {
             vm,
             store,
-            registered_modules,
+            type_map,
+            module_resolver,
             module_cache,
             baseline_globals,
         }
@@ -44,10 +50,24 @@ impl<T: 'static> Engine<T> {
         &mut self.store
     }
 
-    /// Register a virtual module by specifier name.
+    pub fn type_map(&self) -> &TypeMap {
+        &self.type_map
+    }
+
+    pub fn type_map_mut(&mut self) -> &mut TypeMap {
+        &mut self.type_map
+    }
+
+    /// Register a virtual module by specifier name (using default StaticModuleResolver).
+    /// Works only when the engine's resolver is a StaticModuleResolver.
     pub fn register_module(&mut self, name: &str, source: &str) {
-        self.registered_modules
-            .insert(name.to_string(), source.to_string());
+        if let Some(resolver) = self
+            .module_resolver
+            .as_any_mut()
+            .downcast_mut::<StaticModuleResolver>()
+        {
+            resolver.register(name, source);
+        }
     }
 
     pub fn set_fuel(&mut self, fuel: u64) {
@@ -115,23 +135,22 @@ impl<T: 'static> Engine<T> {
     fn load_module(
         &mut self,
         specifier: &str,
-        _referrer: &str,
+        referrer: &str,
     ) -> OneResult<HashMap<String, JsValue>> {
-        if let Some(exports) = self.module_cache.get(specifier) {
+        let resolved = self.module_resolver.resolve(specifier, Some(referrer))?;
+        if let Some(exports) = self.module_cache.get(&resolved) {
             return Ok(exports.clone());
         }
 
-        let source = self.registered_modules.get(specifier).ok_or_else(|| {
-            OneError::InternalError(format!("Module not found: {specifier}"))
-        })?;
+        let source = self.module_resolver.load(&resolved)?;
 
         let saved_globals = self.vm.snapshot_globals();
         self.vm.restore_globals(self.baseline_globals.clone());
 
-        let program = Parser::parse_module(source).map_err(|e| {
+        let program = Parser::parse_module(&source).map_err(|e| {
             OneError::CompileError(CompileError {
                 message: e.message,
-                file: Some(specifier.into()),
+                file: Some(resolved.clone()),
                 line: 0,
                 column: 0,
             })
@@ -140,7 +159,7 @@ impl<T: 'static> Engine<T> {
 
         if let Some(module_info) = &module_code.module_info {
             for import in &module_info.imports {
-                let exports = self.load_module(&import.source, specifier)?;
+                let exports = self.load_module(&import.source, &resolved)?;
                 self.apply_imports(import, &exports);
             }
         }
@@ -154,7 +173,7 @@ impl<T: 'static> Engine<T> {
             .unwrap_or(&[]);
         let exports = self.collect_exports(export_specs);
         self.module_cache
-            .insert(specifier.to_string(), exports.clone());
+            .insert(resolved, exports.clone());
 
         self.vm.restore_globals(saved_globals);
         Ok(exports)
@@ -1669,5 +1688,142 @@ mod tests {
             .build();
         let result = engine.eval("return typeof setTimeout;").unwrap();
         assert_eq!(engine.vm().value_to_string(result), "undefined");
+    }
+
+    // ─── Iterator protocol tests ───
+
+    #[test]
+    fn for_of_map_entries() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let m = new Map();
+                m.set("a", 10);
+                m.set("b", 20);
+                let sum = 0;
+                for (let entry of m) {
+                    sum = sum + entry[1];
+                }
+                return sum;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 30.0);
+    }
+
+    #[test]
+    fn for_of_set_values() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let s = new Set();
+                s.add(1);
+                s.add(2);
+                s.add(3);
+                let sum = 0;
+                for (let v of s) {
+                    sum = sum + v;
+                }
+                return sum;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 6.0);
+    }
+
+    #[test]
+    fn for_of_string_chars() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let count = 0;
+                for (let c of "hello") {
+                    count = count + 1;
+                }
+                return count;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 5.0);
+    }
+
+    #[test]
+    fn async_function_basic() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                async function add(a, b) { return a + b; }
+                let r = await add(1, 2);
+                return r;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn async_arrow_function() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let mul = async (a, b) => a * b;
+                let r = await mul(3, 4);
+                return r;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 12.0);
+    }
+
+    #[test]
+    fn async_function_rejection() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                async function fail() { throw "oops"; }
+                let p = fail();
+                let caught = "none";
+                p.catch(function(e) { caught = e; });
+                return caught;
+            "#,
+            )
+            .unwrap();
+        let s = engine.vm().value_to_string(result);
+        assert_eq!(s, "oops");
+    }
+
+    #[test]
+    fn await_non_promise() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let r = await 42;
+                return r;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn await_promise_resolve() {
+        let mut engine = Engine::new();
+        let result = engine
+            .eval(
+                r#"
+                let p = Promise.resolve(99);
+                let r = await p;
+                return r;
+            "#,
+            )
+            .unwrap();
+        assert!(result.to_number() == 99.0);
     }
 }

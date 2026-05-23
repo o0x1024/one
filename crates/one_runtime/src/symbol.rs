@@ -16,4 +16,12 @@ pub fn install_symbol(vm: &mut Vm) {
         let id = vm.get_or_create_global_symbol(&key);
         Ok(JsValue::from_symbol_raw(id))
     });
+
+    // Well-known symbol: Symbol.iterator
+    let iter_id = vm.get_or_create_global_symbol("Symbol.iterator");
+    let iter_sym = JsValue::from_symbol_raw(iter_id);
+    let sym_val = vm.get_global("Symbol");
+    if let Some(obj) = vm.get_object_mut(sym_val) {
+        obj.set_property("iterator".to_string(), iter_sym);
+    }
 }

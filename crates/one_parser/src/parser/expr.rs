@@ -175,6 +175,14 @@ impl Parser<'_> {
                     span: self.span_from(start),
                 })
             }
+            TokenKind::Await => {
+                self.advance();
+                let argument = self.parse_unary_expression()?;
+                Ok(Expression {
+                    kind: ExpressionKind::AwaitExpression(Box::new(argument)),
+                    span: self.span_from(start),
+                })
+            }
             TokenKind::PlusPlus => {
                 self.advance();
                 let argument = self.parse_unary_expression()?;
@@ -435,6 +443,45 @@ impl Parser<'_> {
             TokenKind::LBracket => self.parse_array_expression(),
             TokenKind::LBrace => self.parse_object_expression(),
             TokenKind::Function => self.parse_function_expression(),
+            TokenKind::Async => {
+                let cp = self.checkpoint();
+                self.advance();
+                if self.at(&TokenKind::Function) {
+                    self.restore(cp);
+                    self.parse_function_expression()
+                } else if self.at(&TokenKind::LParen) {
+                    self.advance();
+                    if self.at(&TokenKind::RParen) {
+                        self.advance();
+                        self.skip_type_annotation();
+                        if self.eat(&TokenKind::Arrow) {
+                            return self.finish_arrow_function(vec![], true, start);
+                        }
+                        self.restore(cp);
+                        Err(self.error("expected expression"))
+                    } else {
+                        let params = self.try_parse_arrow_params()?;
+                        self.expect(&TokenKind::RParen)?;
+                        self.skip_type_annotation();
+                        self.expect(&TokenKind::Arrow)?;
+                        self.finish_arrow_function(params, true, start)
+                    }
+                } else if self.at_identifier() {
+                    let name = self.parse_identifier_name()?;
+                    let param = Pattern {
+                        kind: PatternKind::Identifier {
+                            name,
+                            type_annotation: None,
+                        },
+                        span: self.span_from(start),
+                    };
+                    self.expect(&TokenKind::Arrow)?;
+                    self.finish_arrow_function(vec![param], true, start)
+                } else {
+                    self.restore(cp);
+                    Err(self.error("expected expression"))
+                }
+            }
             TokenKind::Class => self.parse_class_expression(),
             TokenKind::New => self.parse_new_expression(),
             TokenKind::NoSubstitutionTemplate(_)

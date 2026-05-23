@@ -39,6 +39,26 @@ impl Parser<'_> {
                     span: self.span_from(start),
                 })
             }
+            TokenKind::Async => {
+                let cp = self.checkpoint();
+                self.advance();
+                if self.at(&TokenKind::Function) {
+                    self.restore(cp);
+                    let decl = self.parse_function_declaration()?;
+                    Ok(Statement {
+                        kind: StatementKind::Declaration(decl),
+                        span: self.span_from(start),
+                    })
+                } else {
+                    self.restore(cp);
+                    let expr = self.parse_expression()?;
+                    self.expect_semicolon()?;
+                    Ok(Statement {
+                        kind: StatementKind::ExpressionStatement(expr),
+                        span: self.span_from(start),
+                    })
+                }
+            }
             TokenKind::Class => {
                 let decl = self.parse_class_declaration()?;
                 Ok(Statement {

@@ -96,6 +96,9 @@ pub enum Opcode {
     // Debug / special
     Debugger, //       debugger statement
 
+    // Async
+    Await, // AB:   r[A] = await r[B]  (extract resolved value or throw rejected reason)
+
     // Peephole / specialized
     Nop, //             no operation (peephole placeholder)
     Inc, // AB:        r[A] = r[B] + 1

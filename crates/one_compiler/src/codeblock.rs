@@ -11,6 +11,19 @@ pub enum Constant {
     Undefined,
 }
 
+/// Describes how a single upvalue should be captured at closure creation time.
+#[derive(Debug, Clone)]
+pub struct UpvalueDesc {
+    /// Variable name (used for transitive resolution across nesting levels)
+    pub name: String,
+    /// If true, capture from the enclosing function's register (local).
+    /// If false, capture from the enclosing function's upvalue at `index`.
+    pub is_local: bool,
+    /// Register index (when is_local=true) or upvalue index (when is_local=false)
+    /// in the immediately enclosing function.
+    pub index: u8,
+}
+
 /// Compiled function/script bytecode
 #[derive(Debug, Clone)]
 pub struct CodeBlock {
@@ -20,6 +33,7 @@ pub struct CodeBlock {
     pub register_count: u16,
     pub param_count: u16,
     pub upvalue_count: u16,
+    pub upvalue_descs: Vec<UpvalueDesc>,
     pub is_strict: bool,
     pub is_async: bool,
     pub is_generator: bool,
@@ -79,6 +93,7 @@ impl CodeBlock {
             register_count: 0,
             param_count: 0,
             upvalue_count: 0,
+            upvalue_descs: Vec::new(),
             is_strict: false,
             is_async: false,
             is_generator: false,

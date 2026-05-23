@@ -19,6 +19,20 @@ struct CallFrame {
     dest: u8,
     is_constructor: bool,
     this_val: JsValue,
+    /// The function object being executed (undefined for top-level scripts).
+    /// Used to access the function's upvalue cell indices.
+    func_val: JsValue,
+    /// If this frame is an async function call, holds the Promise to resolve/reject.
+    async_promise: Option<JsValue>,
+}
+
+/// A captured variable shared between closures. While the declaring function
+/// is still on the call stack the cell is "open" and reads/writes go through
+/// the stack slot. When the declaring frame returns the cell is "closed" and
+/// owns a copy of the value.
+enum UpvalueCell {
+    Open(usize),
+    Closed(JsValue),
 }
 
 struct ExceptionHandlerFrame {
@@ -94,6 +108,7 @@ pub struct Vm {
     next_timer_id: u32,
     promise_methods: Vec<(JsValue, PromiseMethodKind)>,
     promise_resolvers: Vec<(JsValue, PromiseResolverKind)>,
+    upvalue_cells: Vec<UpvalueCell>,
     array_prototype: Option<JsValue>,
     map_prototype: Option<JsValue>,
     set_prototype: Option<JsValue>,
@@ -105,8 +120,12 @@ pub struct Vm {
     global_symbols: HashMap<String, u32>,
     fuel: Option<u64>,
     fuel_consumed: u64,
+    max_call_depth: Option<usize>,
     hooks: Option<Box<dyn ExecutionHook>>,
     root_shape: Arc<Shape>,
+    /// Set by throw_exception when unwinding through an async frame:
+    /// (promise_val, dest_register). run_until checks and handles this.
+    async_rejection: Option<(JsValue, u8)>,
 }
 
 impl Vm {
@@ -125,6 +144,7 @@ impl Vm {
             next_timer_id: 0,
             promise_methods: Vec::new(),
             promise_resolvers: Vec::new(),
+            upvalue_cells: Vec::new(),
             array_prototype: None,
             map_prototype: None,
             set_prototype: None,
@@ -136,13 +156,19 @@ impl Vm {
             global_symbols: HashMap::new(),
             fuel: None,
             fuel_consumed: 0,
+            max_call_depth: None,
             hooks: None,
             root_shape: Shape::empty(),
+            async_rejection: None,
         }
     }
 
     pub fn set_fuel(&mut self, fuel: u64) {
         self.fuel = Some(fuel);
+    }
+
+    pub fn set_max_call_depth(&mut self, depth: usize) {
+        self.max_call_depth = Some(depth);
     }
 
     pub fn remaining_fuel(&self) -> Option<u64> {
@@ -696,6 +722,8 @@ impl Vm {
                 dest: 0,
                 is_constructor: false,
                 this_val: JsValue::undefined(),
+                func_val,
+                async_promise: None,
             });
             return self.run_until(Some(caller_depth));
         }
@@ -755,12 +783,24 @@ impl Vm {
         }
         for frame in &self.frames {
             Self::push_object_root(roots, frame.this_val);
+            Self::push_object_root(roots, frame.func_val);
+            if let Some(p) = frame.async_promise {
+                Self::push_object_root(roots, p);
+            }
+        }
+        if let Some((p, _)) = self.async_rejection {
+            Self::push_object_root(roots, p);
         }
         for (promise_val, _) in &self.promise_methods {
             Self::push_object_root(roots, *promise_val);
         }
         for (promise_val, _) in &self.promise_resolvers {
             Self::push_object_root(roots, *promise_val);
+        }
+        for cell in &self.upvalue_cells {
+            if let UpvalueCell::Closed(val) = cell {
+                Self::push_object_root(roots, *val);
+            }
         }
         if let Some(proto) = self.array_prototype {
             Self::push_object_root(roots, proto);
@@ -832,6 +872,231 @@ impl Vm {
         }
     }
 
+    /// Find an existing open upvalue cell for `stack_idx`, or create a new one.
+    fn find_or_create_open_upvalue(&mut self, stack_idx: usize) -> u32 {
+        for (i, cell) in self.upvalue_cells.iter().enumerate() {
+            if let UpvalueCell::Open(idx) = cell {
+                if *idx == stack_idx {
+                    return i as u32;
+                }
+            }
+        }
+        let idx = self.upvalue_cells.len();
+        self.upvalue_cells.push(UpvalueCell::Open(stack_idx));
+        idx as u32
+    }
+
+    /// Close all open upvalue cells pointing at or above `stack_level`.
+    /// Must be called *before* truncating the stack.
+    fn close_upvalues_above(&mut self, stack_level: usize) {
+        for cell in &mut self.upvalue_cells {
+            if let UpvalueCell::Open(idx) = cell {
+                if *idx >= stack_level {
+                    let val = self.stack[*idx];
+                    *cell = UpvalueCell::Closed(val);
+                }
+            }
+        }
+    }
+
+    fn read_upvalue(&self, cell_idx: u32) -> JsValue {
+        match &self.upvalue_cells[cell_idx as usize] {
+            UpvalueCell::Open(stack_idx) => self.stack[*stack_idx],
+            UpvalueCell::Closed(val) => *val,
+        }
+    }
+
+    fn write_upvalue(&mut self, cell_idx: u32, val: JsValue) {
+        match &mut self.upvalue_cells[cell_idx as usize] {
+            UpvalueCell::Open(stack_idx) => {
+                self.stack[*stack_idx] = val;
+            }
+            UpvalueCell::Closed(v) => {
+                *v = val;
+            }
+        }
+    }
+
+    /// Create an iterator object for the given iterable value.
+    fn create_iterator(&mut self, iterable: JsValue) -> OneResult<JsValue> {
+        use crate::object::IteratorKind;
+
+        if iterable.is_string() {
+            let s = self.value_to_string(iterable);
+            let chars: Vec<char> = s.chars().collect();
+            let iter_obj = JsObject::with_kind(ObjectKind::Iterator(IteratorKind::String {
+                chars,
+                index: 0,
+            }));
+            return Ok(self.alloc_object(iter_obj));
+        }
+
+        if let Some(obj) = self.get_object(iterable) {
+            match obj.kind() {
+                ObjectKind::Array { length } => {
+                    let length = *length;
+                    let iter_obj =
+                        JsObject::with_kind(ObjectKind::Iterator(IteratorKind::Array {
+                            source: iterable,
+                            index: 0,
+                            length,
+                        }));
+                    return Ok(self.alloc_object(iter_obj));
+                }
+                ObjectKind::Map(data) => {
+                    let entries = data.entries.clone();
+                    let iter_obj =
+                        JsObject::with_kind(ObjectKind::Iterator(IteratorKind::MapEntries {
+                            entries,
+                            index: 0,
+                        }));
+                    return Ok(self.alloc_object(iter_obj));
+                }
+                ObjectKind::Set(data) => {
+                    let values = data.values.clone();
+                    let iter_obj =
+                        JsObject::with_kind(ObjectKind::Iterator(IteratorKind::SetValues {
+                            values,
+                            index: 0,
+                        }));
+                    return Ok(self.alloc_object(iter_obj));
+                }
+                _ => {}
+            }
+        }
+
+        Err(OneError::TypeError(format!(
+            "{iterable} is not iterable"
+        )))
+    }
+
+    /// Advance the iterator and return the next value. Returns undefined if done.
+    fn iterator_next(&mut self, iter_val: JsValue) -> OneResult<JsValue> {
+        use crate::object::IteratorKind;
+
+        // Extract the next action by reading and advancing the iterator state.
+        // We read via raw pointer to avoid holding a borrow across VM operations.
+        enum NextAction {
+            ArrayElem { source: JsValue, index: u32 },
+            StringChar(char),
+            MapEntry(JsValue, JsValue),
+            SetValue(JsValue),
+            UserNext(JsValue),
+            Done,
+        }
+
+        let action = {
+            let Some(raw) = iter_val.as_object_raw() else {
+                return Ok(JsValue::undefined());
+            };
+            let obj_ptr = raw as *mut JsObject;
+            let obj = unsafe { &mut *obj_ptr };
+            if let ObjectKind::Iterator(kind) = obj.kind_mut() {
+                match kind {
+                    IteratorKind::Array { source, index, length } => {
+                        if *index >= *length {
+                            NextAction::Done
+                        } else {
+                            let i = *index;
+                            *index += 1;
+                            NextAction::ArrayElem { source: *source, index: i }
+                        }
+                    }
+                    IteratorKind::String { chars, index } => {
+                        if *index >= chars.len() {
+                            NextAction::Done
+                        } else {
+                            let ch = chars[*index];
+                            *index += 1;
+                            NextAction::StringChar(ch)
+                        }
+                    }
+                    IteratorKind::MapEntries { entries, index } => {
+                        if *index >= entries.len() {
+                            NextAction::Done
+                        } else {
+                            let (k, v) = entries[*index];
+                            *index += 1;
+                            NextAction::MapEntry(k, v)
+                        }
+                    }
+                    IteratorKind::SetValues { values, index } => {
+                        if *index >= values.len() {
+                            NextAction::Done
+                        } else {
+                            let val = values[*index];
+                            *index += 1;
+                            NextAction::SetValue(val)
+                        }
+                    }
+                    IteratorKind::UserDefined { next_fn } => {
+                        NextAction::UserNext(*next_fn)
+                    }
+                }
+            } else {
+                NextAction::Done
+            }
+        };
+
+        match action {
+            NextAction::Done => Ok(JsValue::undefined()),
+            NextAction::ArrayElem { source, index } => {
+                if let Some(obj) = self.get_object(source) {
+                    Ok(obj
+                        .get_property(&index.to_string())
+                        .unwrap_or(JsValue::undefined()))
+                } else {
+                    Ok(JsValue::undefined())
+                }
+            }
+            NextAction::StringChar(ch) => Ok(self.alloc_string(ch.to_string())),
+            NextAction::MapEntry(k, v) => {
+                let pair = self.new_array(2);
+                if let Some(arr) = self.get_object_mut(pair) {
+                    arr.set_property("0".to_string(), k);
+                    arr.set_property("1".to_string(), v);
+                }
+                Ok(pair)
+            }
+            NextAction::SetValue(val) => Ok(val),
+            NextAction::UserNext(next_fn) => {
+                let result = self.call_function(next_fn, &[])?;
+                if let Some(obj) = self.get_object(result) {
+                    let done = obj
+                        .get_property("done")
+                        .map_or(false, |v| v.as_bool().unwrap_or(false));
+                    if done {
+                        return Ok(JsValue::undefined());
+                    }
+                    Ok(obj
+                        .get_property("value")
+                        .unwrap_or(JsValue::undefined()))
+                } else {
+                    Ok(JsValue::undefined())
+                }
+            }
+        }
+    }
+
+    /// Check if an iterator is exhausted.
+    fn iterator_done(&self, iter_val: JsValue) -> bool {
+        use crate::object::IteratorKind;
+
+        let Some(obj) = self.get_object(iter_val) else {
+            return true;
+        };
+        let ObjectKind::Iterator(kind) = obj.kind() else {
+            return true;
+        };
+        match kind {
+            IteratorKind::Array { index, length, .. } => *index >= *length,
+            IteratorKind::String { chars, index } => *index >= chars.len(),
+            IteratorKind::MapEntries { entries, index } => *index >= entries.len(),
+            IteratorKind::SetValues { values, index } => *index >= values.len(),
+            IteratorKind::UserDefined { .. } => false,
+        }
+    }
+
     /// Execute a CodeBlock without draining microtasks (used by eval).
     pub fn execute_inner(&mut self, code: &CodeBlock) -> OneResult<JsValue> {
         let stop_depth = self.frames.len();
@@ -846,6 +1111,8 @@ impl Vm {
             dest: 0,
             is_constructor: false,
             this_val: JsValue::undefined(),
+            func_val: JsValue::undefined(),
+            async_promise: None,
         });
 
         self.run_until(Some(stop_depth))
@@ -878,6 +1145,17 @@ impl Vm {
                 && !hooks.on_instruction(self.fuel_consumed)
             {
                 return Err(OneError::ExecutionAborted);
+            }
+
+            // Handle async rejection: throw_exception rejected a promise and
+            // popped the async frame. Deliver the promise to the caller.
+            if let Some((promise, dest)) = self.async_rejection.take() {
+                if self.frames.is_empty() || stop_depth == Some(self.frames.len()) {
+                    return Ok(promise);
+                }
+                let caller_base = self.frames.last().unwrap().base;
+                self.stack[caller_base + dest as usize] = promise;
+                continue;
             }
 
             let frame_idx = self.frames.len() - 1;
@@ -1314,11 +1592,36 @@ impl Vm {
                         )));
                     }
                     let inner_code = code.inner_functions[func_idx].clone();
+
+                    // Capture upvalues from enclosing scope
+                    let enclosing_func_val = self.frames[frame_idx].func_val;
+                    let mut cell_indices = Vec::with_capacity(inner_code.upvalue_descs.len());
+                    for desc in &inner_code.upvalue_descs {
+                        if desc.is_local {
+                            let stack_idx = base + desc.index as usize;
+                            let cell_idx = self.find_or_create_open_upvalue(stack_idx);
+                            cell_indices.push(cell_idx);
+                        } else {
+                            // Copy cell index from enclosing function's upvalue table
+                            let parent_cell_idx = self
+                                .get_object(enclosing_func_val)
+                                .and_then(|obj| {
+                                    if let ObjectKind::Function(f) = obj.kind() {
+                                        f.upvalue_cells.get(desc.index as usize).copied()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            cell_indices.push(parent_cell_idx);
+                        }
+                    }
+
                     let func_obj = FunctionObject {
                         name: inner_code.name.clone(),
+                        param_count: inner_code.param_count,
                         code: inner_code,
-                        param_count: code.inner_functions[func_idx].param_count,
-                        upvalues: Vec::new(),
+                        upvalue_cells: cell_indices,
                     };
                     let mut func = JsObject::with_kind(ObjectKind::Function(func_obj));
                     let proto = JsObject::new();
@@ -1366,13 +1669,31 @@ impl Vm {
                                 &func_obj.code as *const CodeBlock,
                                 func_obj.param_count,
                                 func_obj.code.register_count,
+                                func_obj.code.is_async,
                             ))
                         } else {
                             None
                         }
                     });
 
-                    if let Some((code_ptr, param_count, register_count)) = js_call {
+                    if let Some((code_ptr, param_count, register_count, is_async)) = js_call {
+                        if let Some(max_depth) = self.max_call_depth {
+                            if self.frames.len() >= max_depth {
+                                return Err(OneError::StackOverflow {
+                                    depth: self.frames.len(),
+                                });
+                            }
+                        }
+
+                        let async_promise = if is_async {
+                            Some(self.alloc_promise(PromiseState::Pending {
+                                on_fulfilled: Vec::new(),
+                                on_rejected: Vec::new(),
+                            }))
+                        } else {
+                            None
+                        };
+
                         let new_base = self.stack.len();
                         self.stack.resize(
                             new_base + register_count as usize,
@@ -1391,6 +1712,8 @@ impl Vm {
                             dest,
                             is_constructor: false,
                             this_val: JsValue::undefined(),
+                            func_val,
+                            async_promise,
                         });
                         continue;
                     }
@@ -1452,6 +1775,8 @@ impl Vm {
                             dest,
                             is_constructor: true,
                             this_val: instance_val,
+                            func_val: ctor_val,
+                            async_promise: None,
                         });
                         continue;
                     }
@@ -1460,11 +1785,18 @@ impl Vm {
                 Opcode::Return => {
                     let val = self.stack[base + instr.a() as usize];
                     let frame = self.frames.pop().unwrap();
+                    self.close_upvalues_above(frame.base);
                     self.stack.truncate(frame.base);
-                    let return_val = if frame.is_constructor && !val.is_object() {
+                    let raw_val = if frame.is_constructor && !val.is_object() {
                         frame.this_val
                     } else {
                         val
+                    };
+                    let return_val = if let Some(promise) = frame.async_promise {
+                        self.settle_promise_fulfilled(promise, raw_val)?;
+                        promise
+                    } else {
+                        raw_val
                     };
                     if self.frames.is_empty() {
                         return Ok(return_val);
@@ -1477,11 +1809,18 @@ impl Vm {
                 }
                 Opcode::ReturnUndef => {
                     let frame = self.frames.pop().unwrap();
+                    self.close_upvalues_above(frame.base);
                     self.stack.truncate(frame.base);
-                    let return_val = if frame.is_constructor {
+                    let raw_val = if frame.is_constructor {
                         frame.this_val
                     } else {
                         JsValue::undefined()
+                    };
+                    let return_val = if let Some(promise) = frame.async_promise {
+                        self.settle_promise_fulfilled(promise, raw_val)?;
+                        promise
+                    } else {
+                        raw_val
                     };
                     if self.frames.is_empty() {
                         return Ok(return_val);
@@ -1522,6 +1861,119 @@ impl Vm {
                     let type_str = val.type_of();
                     self.stack[base + dest as usize] = self.alloc_string(type_str.to_string());
                 }
+                Opcode::GetIterator => {
+                    let dest = instr.a();
+                    let src = instr.b();
+                    let iterable = self.stack[base + src as usize];
+                    let iter_val = self.create_iterator(iterable)?;
+                    self.stack[base + dest as usize] = iter_val;
+                }
+                Opcode::IteratorNext => {
+                    let dest = instr.a();
+                    let iter_reg = instr.b();
+                    let iter_val = self.stack[base + iter_reg as usize];
+                    let value = self.iterator_next(iter_val)?;
+                    self.stack[base + dest as usize] = value;
+                }
+                Opcode::IteratorDone => {
+                    let dest = instr.a();
+                    let iter_reg = instr.b();
+                    let iter_val = self.stack[base + iter_reg as usize];
+                    let done = self.iterator_done(iter_val);
+                    self.stack[base + dest as usize] = JsValue::from_bool(done);
+                }
+                Opcode::GetUpvalue => {
+                    let dest = instr.a();
+                    let uv_idx = instr.b();
+                    let cell_idx = self
+                        .get_object(self.frames[frame_idx].func_val)
+                        .and_then(|obj| {
+                            if let ObjectKind::Function(f) = obj.kind() {
+                                f.upvalue_cells.get(uv_idx as usize).copied()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    let val = self.read_upvalue(cell_idx);
+                    self.stack[base + dest as usize] = val;
+                }
+                Opcode::SetUpvalue => {
+                    let uv_idx = instr.a();
+                    let src = instr.b();
+                    let val = self.stack[base + src as usize];
+                    let cell_idx = self
+                        .get_object(self.frames[frame_idx].func_val)
+                        .and_then(|obj| {
+                            if let ObjectKind::Function(f) = obj.kind() {
+                                f.upvalue_cells.get(uv_idx as usize).copied()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    self.write_upvalue(cell_idx, val);
+                }
+                Opcode::CloseUpvalue => {
+                    let reg = instr.a();
+                    let stack_idx = base + reg as usize;
+                    for cell in &mut self.upvalue_cells {
+                        if let UpvalueCell::Open(idx) = cell {
+                            if *idx == stack_idx {
+                                let val = self.stack[stack_idx];
+                                *cell = UpvalueCell::Closed(val);
+                            }
+                        }
+                    }
+                }
+                Opcode::Await => {
+                    let dest = instr.a();
+                    let src = instr.b();
+                    let val = self.stack[base + src as usize];
+
+                    let promise_state = self.get_object(val).and_then(|obj| {
+                        if let ObjectKind::Promise(state) = obj.kind() {
+                            Some(state.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                    match promise_state {
+                        Some(PromiseState::Fulfilled(resolved)) => {
+                            self.stack[base + dest as usize] = resolved;
+                        }
+                        Some(PromiseState::Rejected(reason)) => {
+                            self.throw_exception(reason)?;
+                        }
+                        Some(PromiseState::Pending { .. }) => {
+                            // Drain microtasks to allow pending promises to settle.
+                            self.drain_microtasks()?;
+                            let settled = self.get_object(val).and_then(|obj| {
+                                if let ObjectKind::Promise(state) = obj.kind() {
+                                    Some(state.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            match settled {
+                                Some(PromiseState::Fulfilled(resolved)) => {
+                                    self.stack[base + dest as usize] = resolved;
+                                }
+                                Some(PromiseState::Rejected(reason)) => {
+                                    self.throw_exception(reason)?;
+                                }
+                                _ => {
+                                    self.stack[base + dest as usize] = JsValue::undefined();
+                                }
+                            }
+                        }
+                        None => {
+                            // Not a Promise — pass through the value as-is (spec behavior).
+                            self.stack[base + dest as usize] = val;
+                        }
+                    }
+                }
                 Opcode::Nop => {}
                 Opcode::Inc => {
                     let b = self.stack[base + instr.b() as usize];
@@ -1549,25 +2001,64 @@ impl Vm {
     fn throw_exception(&mut self, val: JsValue) -> OneResult<()> {
         self.current_exception = Some(val);
 
-        if let Some(handler) = self.exception_stack.pop() {
-            while self.frames.len() > handler.frame_idx + 1 {
+        // Find the nearest async frame boundary.
+        let async_frame_idx = self
+            .frames
+            .iter()
+            .rposition(|f| f.async_promise.is_some());
+
+        if let Some(handler) = self.exception_stack.last() {
+            // If a catch handler exists AND it is within/at the async frame
+            // (or there's no async frame at all), use the handler normally.
+            let handler_is_inside_async = async_frame_idx
+                .map_or(true, |af_idx| handler.frame_idx >= af_idx);
+
+            if handler_is_inside_async {
+                let handler = self.exception_stack.pop().unwrap();
+                while self.frames.len() > handler.frame_idx + 1 {
+                    let popped_frame_idx = self.frames.len() - 1;
+                    let frame = self.frames.pop().unwrap();
+                    self.close_upvalues_above(frame.base);
+                    self.stack.truncate(frame.base);
+                    self.exception_stack
+                        .retain(|h| h.frame_idx != popped_frame_idx);
+                }
+
+                self.frames[handler.frame_idx].pc = handler.catch_pc;
+                return Ok(());
+            }
+        }
+
+        // No catch handler within async boundary.
+        // If there's an async frame, reject its promise instead of propagating.
+        if let Some(af_idx) = async_frame_idx {
+            while self.frames.len() > af_idx + 1 {
                 let popped_frame_idx = self.frames.len() - 1;
                 let frame = self.frames.pop().unwrap();
+                self.close_upvalues_above(frame.base);
                 self.stack.truncate(frame.base);
                 self.exception_stack
                     .retain(|h| h.frame_idx != popped_frame_idx);
             }
 
-            self.frames[handler.frame_idx].pc = handler.catch_pc;
-            Ok(())
-        } else {
-            let message = self.value_to_string(val);
-            Err(OneError::JsException(one_core::JsException {
-                name: "Error".to_string(),
-                message,
-                stack_trace: Vec::new(),
-            }))
+            let frame = self.frames.pop().unwrap();
+            let promise = frame.async_promise.unwrap();
+            self.close_upvalues_above(frame.base);
+            self.stack.truncate(frame.base);
+            self.exception_stack.retain(|h| h.frame_idx != af_idx);
+
+            self.settle_promise_rejected(promise, val)?;
+            self.current_exception = None;
+            self.async_rejection = Some((promise, frame.dest));
+            return Ok(());
         }
+
+        let message = self.value_to_string(val);
+        Err(OneError::JsException(one_core::JsException {
+            name: "Error".to_string(),
+            message,
+            stack_trace: Vec::new(),
+        }))
     }
 
     fn constant_to_value(&mut self, constant: &Constant) -> JsValue {

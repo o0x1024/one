@@ -4,7 +4,7 @@ pub mod shape;
 pub mod vm;
 
 pub use convert::{FromJsValue, IntoJsValue};
-pub use object::{FunctionObject, JsObject, ObjectKind, PromiseState, Property};
+pub use object::{FunctionObject, IteratorKind, JsObject, ObjectKind, PromiseState, Property};
 pub use shape::{PropertyAttributes, Shape};
 pub use vm::{ExecutionHook, GcStats, Vm};
 
@@ -679,5 +679,94 @@ mod tests {
     fn ternary_false() {
         let result = run("return false ? 1 : 2;");
         assert!(result.to_number() == 2.0);
+    }
+
+    // ─── Closure / Upvalue tests ───
+
+    #[test]
+    fn closure_basic_capture() {
+        let result = run("function f(x) { return function() { return x; }; } let g = f(42); return g();");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn closure_curried_add() {
+        let result = run("let f = function(x) { return function(y) { return x + y; }; }; return f(1)(2);");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn closure_arrow_curried() {
+        let result = run("let f = (x) => (y) => x + y; return f(1)(2);");
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn closure_mutable_capture() {
+        let result = run(r#"
+            function counter() {
+                let count = 0;
+                return function() { count = count + 1; return count; };
+            }
+            let c = counter();
+            c();
+            c();
+            return c();
+        "#);
+        assert!(result.to_number() == 3.0);
+    }
+
+    #[test]
+    fn closure_shared_capture() {
+        let result = run(r#"
+            function make() {
+                let x = 0;
+                function inc() { x = x + 1; }
+                function get() { return x; }
+                inc();
+                inc();
+                return get();
+            }
+            return make();
+        "#);
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn closure_captures_multiple() {
+        let result = run(r#"
+            function f(a, b) {
+                return function() { return a * b; };
+            }
+            return f(6, 7)();
+        "#);
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn for_of_string() {
+        let result = run(r#"
+            let count = 0;
+            for (let c of "hi") {
+                count = count + 1;
+            }
+            return count;
+        "#);
+        assert!(result.to_number() == 2.0);
+    }
+
+    #[test]
+    fn closure_three_levels() {
+        let result = run(r#"
+            function a(x) {
+                return function b() {
+                    return function c() {
+                        return x;
+                    };
+                };
+            }
+            return a(99)()();
+        "#);
+        assert!(result.to_number() == 99.0);
     }
 }
