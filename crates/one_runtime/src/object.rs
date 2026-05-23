@@ -73,13 +73,7 @@ pub fn install_object(vm: &mut Vm) {
 
         for &source in args.iter().skip(1) {
             if let Some(src_obj) = vm.get_object(source) {
-                let entries: Vec<(String, JsValue)> = src_obj
-                    .properties()
-                    .iter()
-                    .filter(|(_, p)| p.enumerable)
-                    .map(|(k, p)| (k.clone(), p.value))
-                    .collect();
-                for (key, value) in entries {
+                for (key, value) in src_obj.own_entries() {
                     if let Some(target_obj) = vm.get_object_mut(target) {
                         target_obj.set_property(key, value);
                     }

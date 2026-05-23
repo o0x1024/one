@@ -1,9 +1,11 @@
 pub mod convert;
 pub mod object;
+pub mod shape;
 pub mod vm;
 
 pub use convert::{FromJsValue, IntoJsValue};
 pub use object::{FunctionObject, JsObject, ObjectKind, PromiseState, Property};
+pub use shape::{PropertyAttributes, Shape};
 pub use vm::{ExecutionHook, Vm};
 
 #[cfg(test)]
@@ -448,5 +450,25 @@ mod tests {
         "#,
         );
         assert!(result.to_number() == 30.0);
+    }
+
+    #[test]
+    fn shape_object_operations() {
+        let result = run("let o = {a: 1, b: 2, c: 3}; return o.a + o.b + o.c;");
+        assert!(result.to_number() == 6.0);
+    }
+
+    #[test]
+    fn shape_property_overwrite() {
+        let result = run("let o = {x: 1}; o.x = 42; return o.x;");
+        assert!(result.to_number() == 42.0);
+    }
+
+    #[test]
+    fn shape_object_keys_with_shapes() {
+        let mut obj = JsObject::new();
+        obj.set_property("a".to_string(), JsValue::from_i32(1));
+        obj.set_property("b".to_string(), JsValue::from_i32(2));
+        assert_eq!(obj.enumerable_keys().len(), 2);
     }
 }

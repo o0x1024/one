@@ -5,6 +5,8 @@ use one_core::{JsValue, OneError, OneResult};
 use one_gc::Heap;
 
 use crate::object::{FunctionObject, JsObject, MapData, ObjectKind, PromiseState, SetData};
+use crate::shape::Shape;
+use std::sync::Arc;
 
 const HOST_SENTINEL_MASK: u64 = 0xDEAD_0000;
 const PROMISE_METHOD_MASK: u64 = 0xBEEF_0000;
@@ -91,6 +93,7 @@ pub struct Vm {
     fuel: Option<u64>,
     fuel_consumed: u64,
     hooks: Option<Box<dyn ExecutionHook>>,
+    root_shape: Arc<Shape>,
 }
 
 impl Vm {
@@ -120,6 +123,7 @@ impl Vm {
             fuel: None,
             fuel_consumed: 0,
             hooks: None,
+            root_shape: Shape::empty(),
         }
     }
 
@@ -1109,7 +1113,8 @@ impl Vm {
                 }
                 Opcode::CreateObject => {
                     let dest = instr.a();
-                    let obj = JsObject::new();
+                    let obj =
+                        JsObject::with_shared_shape(self.root_shape.clone(), ObjectKind::Ordinary);
                     let val = self.alloc_object(obj);
                     self.stack[base + dest as usize] = val;
                 }
