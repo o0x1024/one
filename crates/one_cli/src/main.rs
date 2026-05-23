@@ -1,6 +1,10 @@
-use one_engine::Engine;
+use one_engine::{
+    Engine, EngineBuilder, FileModuleResolver, ModuleResolverChain, StaticModuleResolver,
+    UrlModuleResolver,
+};
 use std::env;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -101,13 +105,49 @@ fn run_code(code: &str) {
 }
 
 fn run_file(path: &str) {
-    let mut engine = Engine::new();
+    let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf());
+    let script_dir = abs_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
 
-    match engine.eval_file(path) {
-        Ok(_) => {}
+    let source = match std::fs::read_to_string(&abs_path) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: {e}");
+            eprintln!("Error: Failed to read file '{path}': {e}");
             std::process::exit(1);
+        }
+    };
+
+    let has_imports = source.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("import ") || trimmed.starts_with("import{")
+    });
+
+    let chain = ModuleResolverChain::new()
+        .push(StaticModuleResolver::new())
+        .push(FileModuleResolver::new(&script_dir))
+        .push(UrlModuleResolver::with_default_cache());
+
+    let mut engine = EngineBuilder::new()
+        .module_resolver(chain)
+        .build();
+
+    if has_imports {
+        match engine.eval_module(&source, &abs_path.to_string_lossy()) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match engine.eval_file(path) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

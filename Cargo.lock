@@ -446,6 +446,7 @@ dependencies = [
  "one_runtime",
  "one_vm",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

@@ -12,7 +12,10 @@ pub use builder::EngineBuilder;
 pub use engine::Engine;
 pub use extension::{Extension, HostFnDescriptor, host_fn};
 pub use limits::RuntimeLimits;
-pub use module_resolver::{ModuleResolver, StaticModuleResolver};
+pub use module_resolver::{
+    FileModuleResolver, ModuleResolver, ModuleResolverChain, StaticModuleResolver,
+    UrlModuleResolver,
+};
 pub use preset::{BuiltinModule, Preset};
 pub use serde::{js_to_json, json_to_js};
 pub use type_map::TypeMap;

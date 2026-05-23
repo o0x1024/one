@@ -6,7 +6,10 @@ use one_vm::Vm;
 use crate::engine::Engine;
 use crate::extension::Extension;
 use crate::limits::RuntimeLimits;
-use crate::module_resolver::{ModuleResolver, StaticModuleResolver};
+use crate::module_resolver::{
+    FileModuleResolver, ModuleResolver, ModuleResolverChain, StaticModuleResolver,
+    UrlModuleResolver,
+};
 use crate::preset::Preset;
 
 type HostFn = Box<dyn Fn(&mut Vm, &[JsValue]) -> OneResult<JsValue>>;
@@ -156,16 +159,20 @@ impl<T: 'static> EngineBuilder<T> {
             vm.execute(&code).expect("Extension bootstrap JS execution error");
         }
 
-        // Build module resolver: use custom if provided, else StaticModuleResolver.
+        // Build module resolver: use custom if provided, else build a default chain.
         let module_resolver: Box<dyn ModuleResolver> = if let Some(resolver) = self.module_resolver
         {
             resolver
         } else {
-            let mut resolver = StaticModuleResolver::new();
+            let mut static_resolver = StaticModuleResolver::new();
             for (name, source) in &self.modules {
-                resolver.register(name, source);
+                static_resolver.register(name, source);
             }
-            Box::new(resolver)
+            let chain = ModuleResolverChain::new()
+                .push(static_resolver)
+                .push(FileModuleResolver::from_cwd())
+                .push(UrlModuleResolver::with_default_cache());
+            Box::new(chain)
         };
 
         let baseline_globals = vm.snapshot_globals();

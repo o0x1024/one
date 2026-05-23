@@ -58,10 +58,17 @@ impl<T: 'static> Engine<T> {
         &mut self.type_map
     }
 
-    /// Register a virtual module by specifier name (using default StaticModuleResolver).
-    /// Works only when the engine's resolver is a StaticModuleResolver.
+    /// Register a virtual module by specifier name.
+    /// Works with StaticModuleResolver (direct or inside a chain).
     pub fn register_module(&mut self, name: &str, source: &str) {
-        if let Some(resolver) = self
+        use crate::module_resolver::ModuleResolverChain;
+        if let Some(chain) = self
+            .module_resolver
+            .as_any_mut()
+            .downcast_mut::<ModuleResolverChain>()
+        {
+            chain.register_static_module(name, source);
+        } else if let Some(resolver) = self
             .module_resolver
             .as_any_mut()
             .downcast_mut::<StaticModuleResolver>()
