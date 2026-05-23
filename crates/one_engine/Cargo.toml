@@ -10,6 +10,7 @@ typescript = []
 modules = []
 timers = []
 regexp = ["one_runtime/regexp"]
+net = ["one_runtime/net"]
 
 [dependencies]
 one_core.workspace = true

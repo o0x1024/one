@@ -7,6 +7,8 @@ pub mod error;
 pub mod globals;
 pub mod json;
 pub mod math;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod number;
 pub mod object;
 pub mod preset;
@@ -40,4 +42,6 @@ pub fn install_builtins(vm: &mut Vm) {
     symbol::install_symbol(vm);
     regexp::install_regexp(vm);
     weakref::install_weakref(vm);
+    #[cfg(feature = "net")]
+    net::install_net(vm);
 }

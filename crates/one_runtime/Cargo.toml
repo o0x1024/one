@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = []
 regexp = []
+net = ["dep:ureq", "dep:tungstenite", "dep:rustls", "dep:rustls-pki-types", "dep:webpki-roots", "dep:x509-parser"]
 
 [dependencies]
 one_core.workspace = true
@@ -13,3 +14,9 @@ one_compiler.workspace = true
 one_parser.workspace = true
 one_vm.workspace = true
 regex = "1"
+ureq = { version = "3", optional = true }
+tungstenite = { version = "0.26", optional = true }
+rustls = { version = "0.23", optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }
+x509-parser = { version = "0.17", optional = true }

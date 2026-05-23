@@ -3,6 +3,10 @@ name = "one_cli"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = ["net"]
+net = ["one_engine/net"]
+
 [dependencies]
 one_engine.workspace = true
 one_core.workspace = true

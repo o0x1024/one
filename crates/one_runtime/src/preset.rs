@@ -1,9 +1,11 @@
 use one_vm::Vm;
 
 use crate::{
-    array, boolean, collections, console, date, error, globals, json, math, number, object, promise,
-    regexp, string, symbol, timers,
+    array, boolean, collections, console, date, error, globals, json, math, number, object,
+    promise, regexp, string, symbol, timers,
 };
+#[cfg(feature = "net")]
+use crate::net;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Preset {
@@ -32,6 +34,8 @@ pub enum BuiltinModule {
     Symbol,
     Error,
     Globals,
+    #[cfg(feature = "net")]
+    Net,
 }
 
 /// Default instruction fuel for [`Preset::Sandbox`] when no explicit limit is set.
@@ -84,6 +88,8 @@ pub fn install_preset(vm: &mut Vm, preset: &Preset) {
                     BuiltinModule::Symbol => symbol::install_symbol(vm),
                     BuiltinModule::Error => error::install_error(vm),
                     BuiltinModule::Globals => globals::install_globals(vm),
+                    #[cfg(feature = "net")]
+                    BuiltinModule::Net => net::install_net(vm),
                 }
             }
         }
